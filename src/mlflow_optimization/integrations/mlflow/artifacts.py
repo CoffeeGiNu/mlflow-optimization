@@ -39,4 +39,6 @@ def _artifact_store_sdk_call[ReturnType](
     try:
         return mlflow_call()
     except Exception as error:
-        raise ArtifactStoreError("MLflow artifact storage failed.") from error
+        raise ArtifactStoreError(
+            f"Failed while logging an artifact: {type(error).__name__}: {error}"
+        ) from error
