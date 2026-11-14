@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import base64
+import zlib
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import mlflow
 from mlflow.entities import Metric, Param, Run, RunTag
-from mlflow.exceptions import MlflowException
 from mlflow.tracking import MlflowClient
 from mlflow.tracking.context.registry import resolve_tags
 from mlflow.tracking.fluent import ActiveRun, _get_experiment_id
 from mlflow.utils.mlflow_tags import MLFLOW_PARENT_RUN_ID, MLFLOW_RUN_NAME
-from mlflow.utils.server_info import ServerInfoRequestError
 from mlflow.utils.validation import (
     MAX_BATCH_LOG_REQUEST_SIZE,
     MAX_ENTITY_KEY_LENGTH,
@@ -24,12 +24,11 @@ from mlflow.utils.validation import (
     path_not_unique,
     validate_param_and_metric_name,
 )
-from requests.exceptions import RequestException
 
 from mlflow_optimization.features.runs.types import RunReference, SolveRecord
 from mlflow_optimization.features.runs.ports import RunStoreError
 
-_RESERVED_KEY_PREFIXES: tuple[str, ...] = ("optimization.", "mlflow.")
+_ENCODED_KEY_PREFIX: str = "_mlflow_key_"
 _SOLVE_IDENTITY_TAG_KEYS: tuple[str, ...] = (
     "optimization.solve_id",
     "optimization.solve_index",
@@ -41,40 +40,29 @@ class MlflowRunStore:
     """Solve runs stored through the MLflow tracking client."""
 
     def active_run(self: MlflowRunStore) -> RunReference | None:
-        try:
-            active_mlflow_run: ActiveRun | None = mlflow.active_run()
-            if active_mlflow_run is None:
-                return None
-            return RunReference(
-                run_id=active_mlflow_run.info.run_id,
-                experiment_id=active_mlflow_run.info.experiment_id,
-            )
-        except (
-            MlflowException,
-            ServerInfoRequestError,
-            RequestException,
-            OSError,
-            ImportError,
-        ) as error:
-            raise RunStoreError("MLflow run storage failed.") from error
+        active_mlflow_run: ActiveRun | None = _run_store_sdk_call(mlflow.active_run)
+        if active_mlflow_run is None:
+            return None
+        active_run_id: str = _run_store_sdk_call(lambda: active_mlflow_run.info.run_id)
+        active_experiment_id: str = _run_store_sdk_call(
+            lambda: active_mlflow_run.info.experiment_id
+        )
+        return RunReference(
+            run_id=active_run_id,
+            experiment_id=active_experiment_id,
+        )
 
     def save(self: MlflowRunStore, record: SolveRecord, parent: RunReference | None) -> RunReference:
-        try:
-            return self._save(record, parent)
-        except (
-            MlflowException,
-            ServerInfoRequestError,
-            RequestException,
-            OSError,
-            ImportError,
-        ) as error:
-            raise RunStoreError("MLflow run storage failed.") from error
+        return self._save(record, parent)
 
     def _save(self: MlflowRunStore, record: SolveRecord, parent: RunReference | None) -> RunReference:
-        tracking_client: MlflowClient = MlflowClient(tracking_uri=mlflow.get_tracking_uri())
+        tracking_uri: str = _run_store_sdk_call(mlflow.get_tracking_uri)
+        tracking_client: MlflowClient = _run_store_sdk_call(
+            lambda: MlflowClient(tracking_uri=tracking_uri)
+        )
         experiment_id: str
         if parent is None:
-            resolved_experiment_id: str | None = _get_experiment_id()
+            resolved_experiment_id: str | None = _run_store_sdk_call(_get_experiment_id)
             if resolved_experiment_id is None:
                 raise RunStoreError("MLflow did not resolve an experiment ID.")
             experiment_id = resolved_experiment_id
@@ -87,7 +75,9 @@ class MlflowRunStore:
             resolved_tag_values[MLFLOW_PARENT_RUN_ID] = parent.run_id
         if run_name:
             resolved_tag_values[MLFLOW_RUN_NAME] = run_name
-        context_tag_values: dict[str, Any] = resolve_tags(resolved_tag_values)
+        context_tag_values: dict[str, Any] = _run_store_sdk_call(
+            lambda: resolve_tags(resolved_tag_values)
+        )
 
         creation_tag_values: dict[str, str] = {}
         identity_tag_key: str
@@ -99,24 +89,30 @@ class MlflowRunStore:
         if parent is not None:
             creation_tag_values[MLFLOW_PARENT_RUN_ID] = parent.run_id
 
-        created_run: Run = tracking_client.create_run(
-            experiment_id=experiment_id,
-            start_time=record.start_time_ms,
-            tags=creation_tag_values,
-            run_name=run_name,
+        created_run: Run = _run_store_sdk_call(
+            lambda: tracking_client.create_run(
+                experiment_id=experiment_id,
+                start_time=record.start_time_ms,
+                tags=creation_tag_values,
+                run_name=run_name,
+            )
         )
+        created_run_id: str = _run_store_sdk_call(lambda: created_run.info.run_id)
 
         try:
             metric_entities: list[Metric] = []
             metric_key: str
             metric_value: float
             for metric_key, metric_value in record.metrics.items():
+                encoded_metric_key: str = _encode_key(metric_key)
                 metric_entities.append(
-                    Metric(
-                        key=_sanitize_key(metric_key),
-                        value=metric_value,
-                        timestamp=record.end_time_ms,
-                        step=0,
+                    _run_store_sdk_call(
+                        lambda: Metric(
+                            key=encoded_metric_key,
+                            value=metric_value,
+                            timestamp=record.end_time_ms,
+                            step=0,
+                        )
                     )
                 )
 
@@ -124,65 +120,64 @@ class MlflowRunStore:
             parameter_key: str
             parameter_value: str
             for parameter_key, parameter_value in record.params.items():
+                encoded_parameter_key: str = _encode_key(parameter_key)
                 parameter_entities.append(
-                    Param(
-                        key=_sanitize_key(parameter_key),
-                        value=parameter_value[:MAX_PARAM_VAL_LENGTH],
+                    _run_store_sdk_call(
+                        lambda: Param(
+                            key=encoded_parameter_key,
+                            value=parameter_value[:MAX_PARAM_VAL_LENGTH],
+                        )
                     )
                 )
 
-            self._log_metric_batches(tracking_client, created_run.info.run_id, metric_entities)
+            self._log_metric_batches(tracking_client, created_run_id, metric_entities)
             self._log_parameter_batches(
                 tracking_client,
-                created_run.info.run_id,
+                created_run_id,
                 parameter_entities,
             )
             self._log_tag_batches(
                 tracking_client,
-                created_run.info.run_id,
+                created_run_id,
                 _make_tag_entities(context_tag_values),
             )
         finally:
-            tracking_client.set_terminated(
-                run_id=created_run.info.run_id,
-                status=record.status.value,
-                end_time=record.end_time_ms,
+            _run_store_sdk_call(
+                lambda: tracking_client.set_terminated(
+                    run_id=created_run_id,
+                    status=record.status.value,
+                    end_time=record.end_time_ms,
+                )
             )
+        created_experiment_id: str = _run_store_sdk_call(
+            lambda: created_run.info.experiment_id
+        )
         return RunReference(
-            run_id=created_run.info.run_id,
-            experiment_id=created_run.info.experiment_id,
+            run_id=created_run_id,
+            experiment_id=created_experiment_id,
         )
 
     def log_metric(self: MlflowRunStore, run: RunReference, key: str, value: float) -> None:
-        try:
-            tracking_client: MlflowClient = MlflowClient(tracking_uri=mlflow.get_tracking_uri())
-            tracking_client.log_metric(
+        tracking_uri: str = _run_store_sdk_call(mlflow.get_tracking_uri)
+        tracking_client: MlflowClient = _run_store_sdk_call(
+            lambda: MlflowClient(tracking_uri=tracking_uri)
+        )
+        encoded_key: str = _encode_key(key)
+        _run_store_sdk_call(
+            lambda: tracking_client.log_metric(
                 run_id=run.run_id,
-                key=_sanitize_key(key),
+                key=encoded_key,
                 value=value,
                 synchronous=True,
             )
-        except (
-            MlflowException,
-            ServerInfoRequestError,
-            RequestException,
-            OSError,
-            ImportError,
-        ) as error:
-            raise RunStoreError("MLflow run storage failed.") from error
+        )
 
     def set_tags(self: MlflowRunStore, run: RunReference, tags: Mapping[str, str]) -> None:
-        try:
-            tracking_client: MlflowClient = MlflowClient(tracking_uri=mlflow.get_tracking_uri())
-            self._log_tag_batches(tracking_client, run.run_id, _make_tag_entities(tags))
-        except (
-            MlflowException,
-            ServerInfoRequestError,
-            RequestException,
-            OSError,
-            ImportError,
-        ) as error:
-            raise RunStoreError("MLflow run storage failed.") from error
+        tracking_uri: str = _run_store_sdk_call(mlflow.get_tracking_uri)
+        tracking_client: MlflowClient = _run_store_sdk_call(
+            lambda: MlflowClient(tracking_uri=tracking_uri)
+        )
+        self._log_tag_batches(tracking_client, run.run_id, _make_tag_entities(tags))
 
     def _log_metric_batches(
         self: MlflowRunStore,
@@ -206,10 +201,12 @@ class MlflowRunStore:
                 len(current_batch) >= MAX_METRICS_PER_BATCH
                 or current_batch_size + added_size > MAX_BATCH_LOG_REQUEST_SIZE
             ):
-                tracking_client.log_batch(
-                    run_id=run_id,
-                    metrics=current_batch,
-                    synchronous=True,
+                _run_store_sdk_call(
+                    lambda: tracking_client.log_batch(
+                        run_id=run_id,
+                        metrics=current_batch,
+                        synchronous=True,
+                    )
                 )
                 current_batch = []
                 current_batch_size = _empty_batch_request_size(run_id)
@@ -217,10 +214,12 @@ class MlflowRunStore:
             current_batch.append(metric_entity)
             current_batch_size += added_size
         if current_batch:
-            tracking_client.log_batch(
-                run_id=run_id,
-                metrics=current_batch,
-                synchronous=True,
+            _run_store_sdk_call(
+                lambda: tracking_client.log_batch(
+                    run_id=run_id,
+                    metrics=current_batch,
+                    synchronous=True,
+                )
             )
 
     def _log_parameter_batches(
@@ -243,10 +242,12 @@ class MlflowRunStore:
                 len(current_batch) >= MAX_PARAMS_TAGS_PER_BATCH
                 or current_batch_size + added_size > MAX_BATCH_LOG_REQUEST_SIZE
             ):
-                tracking_client.log_batch(
-                    run_id=run_id,
-                    params=current_batch,
-                    synchronous=True,
+                _run_store_sdk_call(
+                    lambda: tracking_client.log_batch(
+                        run_id=run_id,
+                        params=current_batch,
+                        synchronous=True,
+                    )
                 )
                 current_batch = []
                 current_batch_size = _empty_batch_request_size(run_id)
@@ -254,10 +255,12 @@ class MlflowRunStore:
             current_batch.append(parameter_entity)
             current_batch_size += added_size
         if current_batch:
-            tracking_client.log_batch(
-                run_id=run_id,
-                params=current_batch,
-                synchronous=True,
+            _run_store_sdk_call(
+                lambda: tracking_client.log_batch(
+                    run_id=run_id,
+                    params=current_batch,
+                    synchronous=True,
+                )
             )
 
     def _log_tag_batches(
@@ -280,10 +283,12 @@ class MlflowRunStore:
                 len(current_batch) >= MAX_PARAMS_TAGS_PER_BATCH
                 or current_batch_size + added_size > MAX_BATCH_LOG_REQUEST_SIZE
             ):
-                tracking_client.log_batch(
-                    run_id=run_id,
-                    tags=current_batch,
-                    synchronous=True,
+                _run_store_sdk_call(
+                    lambda: tracking_client.log_batch(
+                        run_id=run_id,
+                        tags=current_batch,
+                        synchronous=True,
+                    )
                 )
                 current_batch = []
                 current_batch_size = _empty_batch_request_size(run_id)
@@ -291,41 +296,55 @@ class MlflowRunStore:
             current_batch.append(tag_entity)
             current_batch_size += added_size
         if current_batch:
-            tracking_client.log_batch(
-                run_id=run_id,
-                tags=current_batch,
-                synchronous=True,
+            _run_store_sdk_call(
+                lambda: tracking_client.log_batch(
+                    run_id=run_id,
+                    tags=current_batch,
+                    synchronous=True,
+                )
             )
 
 
-def _sanitize_key(key: str) -> str:
-    sanitized_characters: list[str] = []
+def _encode_key(key: str) -> str:
+    valid_key: bool = bool(
+        _run_store_sdk_call(lambda: validate_param_and_metric_name(key))
+    )
+    unique_path: bool = not _run_store_sdk_call(lambda: path_not_unique(key))
+    if (
+        valid_key
+        and unique_path
+        and len(key) <= MAX_ENTITY_KEY_LENGTH
+        and not key.startswith(_ENCODED_KEY_PREFIX)
+    ):
+        return key
+
+    encoded_characters: list[str] = []
     character: str
     for character in key:
-        if validate_param_and_metric_name(character):
-            sanitized_characters.append(character)
+        if character == "_":
+            encoded_characters.append("__")
+        elif character == "/":
+            encoded_characters.append("_x2F_")
+        elif _run_store_sdk_call(
+            lambda: validate_param_and_metric_name(character)
+        ):
+            encoded_characters.append(character)
         else:
-            sanitized_characters.append("_")
+            encoded_characters.append(f"_x{ord(character):X}_")
 
-    safe_segments: list[str] = []
-    segment: str
-    for segment in "".join(sanitized_characters).split("/"):
-        if not segment or segment == ".":
-            continue
-        if segment == "..":
-            safe_segments.append("_")
-        else:
-            safe_segments.append(segment)
+    escaped_key: str = _ENCODED_KEY_PREFIX + "e_" + "".join(encoded_characters)
+    if len(escaped_key) <= MAX_ENTITY_KEY_LENGTH:
+        return escaped_key
 
-    sanitized_key: str = "/".join(safe_segments)[:MAX_ENTITY_KEY_LENGTH].rstrip("/")
-    if not sanitized_key or path_not_unique(sanitized_key):
-        return "_"
-    if (
-        sanitized_key.startswith(_RESERVED_KEY_PREFIXES)
-        and not key.startswith(_RESERVED_KEY_PREFIXES)
-    ):
-        sanitized_key = ("_" + sanitized_key)[:MAX_ENTITY_KEY_LENGTH].rstrip("/")
-    return sanitized_key
+    key_bytes: bytes = key.encode("utf-8", errors="surrogatepass")
+    compressed_key_bytes: bytes = zlib.compress(key_bytes, level=9)
+    base64_key_bytes: bytes = base64.urlsafe_b64encode(compressed_key_bytes)
+    compressed_key: str = (
+        _ENCODED_KEY_PREFIX + "z_" + base64_key_bytes.decode("ascii").rstrip("=")
+    )
+    if len(compressed_key) > MAX_ENTITY_KEY_LENGTH:
+        raise RunStoreError("MLflow cannot encode this key within its length limit.")
+    return compressed_key
 
 
 def _truncate_tag_value(value: str) -> str:
@@ -337,10 +356,14 @@ def _make_tag_entities(tag_values: Mapping[str, Any]) -> list[RunTag]:
     tag_key: str
     tag_value: Any
     for tag_key, tag_value in tag_values.items():
+        encoded_tag_key: str = _encode_key(tag_key)
+        truncated_tag_value: str = _truncate_tag_value(str(tag_value))
         tag_entities.append(
-            RunTag(
-                key=_sanitize_key(tag_key),
-                value=_truncate_tag_value(str(tag_value)),
+            _run_store_sdk_call(
+                lambda: RunTag(
+                    key=encoded_tag_key,
+                    value=truncated_tag_value,
+                )
             )
         )
     return tag_entities
@@ -359,3 +382,11 @@ def _empty_batch_request_size(run_id: str) -> int:
 def _serialized_item_size(item: dict[str, str | float | int]) -> int:
     serialized_item: str = json.dumps(item, ensure_ascii=True, separators=(",", ":"))
     return len(serialized_item.encode("utf-8"))
+
+
+def _run_store_sdk_call[ReturnType](mlflow_call: Callable[[], ReturnType]) -> ReturnType:
+    """An MLflow SDK call converted to a run-store error."""
+    try:
+        return mlflow_call()
+    except Exception as error:
+        raise RunStoreError("MLflow run storage failed.") from error
