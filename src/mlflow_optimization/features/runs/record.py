@@ -13,7 +13,10 @@ from mlflow_optimization.features.annotations.annotate import (
 )
 from mlflow_optimization.features.annotations.models import Annotation, KpiEntry
 from mlflow_optimization.features.artifacts.policy import artifact_refusal
-from mlflow_optimization.features.artifacts.ports import ArtifactStore
+from mlflow_optimization.features.artifacts.ports import (
+    ArtifactStore,
+    ArtifactStoreError,
+)
 from mlflow_optimization.features.autolog.models import CompletedSolve, SolveObservation
 from mlflow_optimization.features.metadata.collect import collect_metadata
 from mlflow_optimization.features.metadata.models import CollectedMetadata
@@ -26,7 +29,7 @@ from mlflow_optimization.features.outcomes.classify import (
 from mlflow_optimization.features.outcomes.models import SolveOutcome
 
 from .models import RecordOptions, RunRef, RunStatus, SolveRecord
-from .ports import RunStore
+from .ports import RunStore, RunStoreError
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,7 @@ class SolveRun:
         description: str | None = None,
     ) -> None:
         """Add a user KPI to this solve."""
+        error: RunStoreError
         try:
             entry: KpiEntry | None = kpi_entry(
                 name, value, unit=unit, description=description
@@ -72,20 +76,22 @@ class SolveRun:
                 self._runs.log_metric(self._run, entry.metric_key, entry.value)
                 if entry.tags:
                     self._runs.set_tags(self._run, entry.tags)
-        except Exception as error:
+        except RunStoreError as error:
             warn(f"Could not log KPI: {error}")
 
     def set_tags(self, tags: Mapping[str, str]) -> None:
         """Add user tags to this solve."""
+        error: RunStoreError
         try:
             accepted: dict[str, str] = user_tags(tags)
             if accepted:
                 self._runs.set_tags(self._run, accepted)
-        except Exception as error:
+        except RunStoreError as error:
             warn(f"Could not set tags: {error}")
 
     def log_artifact(self, local_path: str, artifact_path: str | None = None) -> None:
         """Attach a local file to this solve."""
+        error: ArtifactStoreError
         try:
             refusal: str | None = artifact_refusal(
                 local_path, enabled=self._options.log_artifacts
@@ -94,7 +100,7 @@ class SolveRun:
                 warn(refusal)
                 return
             self._artifacts.log_artifact(self.run_id, local_path, artifact_path)
-        except Exception as error:
+        except ArtifactStoreError as error:
             warn(f"Could not log artifact: {error}")
 
 
@@ -115,7 +121,14 @@ class RecordSolve:
 
     def begin(self) -> object:
         """The parent run and annotations in effect at solve start."""
-        return _RecordingContext(self._runs.active_run(), current_annotation())
+        parent: RunRef | None
+        error: RunStoreError
+        try:
+            parent = self._runs.active_run()
+        except RunStoreError as error:
+            warn(f"Could not get active run: {error}")
+            parent = None
+        return _RecordingContext(parent, current_annotation())
 
     def record(self, solve: CompletedSolve, context: object) -> None:
         """Store one completed solve."""
@@ -162,7 +175,13 @@ class RecordSolve:
             metrics=metrics.values,
             params=metadata.params,
         )
-        run: RunRef = self._runs.save(record, context.parent)
+        run: RunRef
+        error: RunStoreError
+        try:
+            run = self._runs.save(record, context.parent)
+        except RunStoreError as error:
+            warn(f"Could not record solve: {error}")
+            return
         _last_solve.set(SolveRun(run, self._runs, self._artifacts, self.options))
 
 
