@@ -16,7 +16,7 @@ from ortools.math_opt.python.parameters import SolveParameters, SolverType
 from ortools.math_opt.python.result import SolveResult
 from ortools.math_opt.python.solve import StatusNotOk
 
-from mlflow_optimization.common.patching import Patch
+from mlflow_optimization.common.patching import Patch, receiver_of
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
 from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.metadata.types import (
@@ -83,14 +83,17 @@ class Integration:
         )
 
         @wraps(original_solve)
-        def wrapped_solve(
-            *call_arguments: object, **call_keywords: object
-        ) -> SolveResult:
+        def wrapped_solve(*args: object, **kwargs: object) -> SolveResult:
             call_signature: Signature = signature(original_solve)
-            call_signature.bind(*call_arguments, **call_keywords)
+            call_signature.bind(*args, **kwargs)
+            receiver: object = (
+                receiver_of(original_solve, args, kwargs)
+                if entry_point == "incremental"
+                else _UNAVAILABLE
+            )
 
             def call() -> SolveResult:
-                return original_solve(*call_arguments, **call_keywords)
+                return original_solve(*args, **kwargs)
 
             def extract(
                 result: SolveResult | None,
@@ -100,8 +103,9 @@ class Integration:
                     result,
                     error,
                     entry_point,
-                    call_arguments,
-                    cast(dict[str, object], call_keywords),
+                    args,
+                    cast(dict[str, object], kwargs),
+                    receiver,
                 )
 
             return observer.observe(self.api, call, extract)
@@ -115,6 +119,7 @@ class Integration:
         entry_point: str,
         call_arguments: tuple[object, ...],
         call_keywords: Mapping[str, object],
+        receiver: object,
     ) -> SolveObservation:
         """The solver-independent snapshot of one MathOpt result."""
         try:
@@ -122,9 +127,10 @@ class Integration:
                 entry_point,
                 call_arguments,
                 call_keywords,
+                receiver,
             )
             model: Model | None = self._model(
-                entry_point, call_arguments, call_keywords
+                entry_point, call_arguments, call_keywords, receiver
             )
             solve_parameters: SolveParameters | None = self._solve_parameters(
                 call_keywords
@@ -157,17 +163,11 @@ class Integration:
         entry_point: str,
         call_arguments: tuple[object, ...],
         call_keywords: Mapping[str, object],
+        receiver: object,
     ) -> SolverType | None:
         """The solver type supplied to a MathOpt entry point."""
         if entry_point == "incremental":
-            incremental_solver: object = (
-                call_arguments[0]
-                if call_arguments
-                else call_keywords.get("self", _UNAVAILABLE)
-            )
-            solver_type: object = self._guarded_attribute(
-                incremental_solver, "_solver_type"
-            )
+            solver_type: object = self._guarded_attribute(receiver, "_solver_type")
             return solver_type if isinstance(solver_type, SolverType) else None
         solver_type: object = call_keywords.get("solver_type", _UNAVAILABLE)
         if solver_type is _UNAVAILABLE and len(call_arguments) > 1:
@@ -179,15 +179,11 @@ class Integration:
         entry_point: str,
         call_arguments: tuple[object, ...],
         call_keywords: Mapping[str, object],
+        receiver: object,
     ) -> Model | None:
         """The model supplied to a MathOpt entry point."""
         if entry_point == "incremental":
-            incremental_solver: object = (
-                call_arguments[0]
-                if call_arguments
-                else call_keywords.get("self", _UNAVAILABLE)
-            )
-            model: object = self._guarded_attribute(incremental_solver, "_model")
+            model: object = self._guarded_attribute(receiver, "_model")
             return model if isinstance(model, Model) else None
         model: object = call_keywords.get("opt_model", _UNAVAILABLE)
         if model is _UNAVAILABLE and call_arguments:
@@ -424,13 +420,19 @@ class Integration:
         if result is None:
             return statistics
         supported_statistics: set[str] = set()
+        zero_statistics_are_known: set[str] = set()
         if solver_type is SolverType.GLOP:
             supported_statistics.add("simplex_iterations")
         elif solver_type is SolverType.GSCIP:
-            supported_statistics.add("node_count")
-            if self._gscip_iteration_statistics_available(result):
-                supported_statistics.update(
-                    ("simplex_iterations", "barrier_iterations")
+            supported_statistics.update(
+                ("node_count", "simplex_iterations", "barrier_iterations")
+            )
+            if self._gscip_statistics_availability_is_known(
+                result,
+                solve_parameters,
+            ):
+                zero_statistics_are_known.update(
+                    ("node_count", "simplex_iterations", "barrier_iterations")
                 )
         elif solver_type is SolverType.HIGHS:
             has_integer_variables: bool | None = self._has_integer_variables(model)
@@ -452,51 +454,34 @@ class Integration:
                 continue
             value: object = self._guarded_attribute(solve_stats, statistic_name)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
-                statistics[statistic_name] = float(value)
-            elif value is _UNAVAILABLE:
+                if value != 0 or statistic_name in zero_statistics_are_known:
+                    statistics[statistic_name] = float(value)
+            elif value is _UNAVAILABLE and statistic_name in zero_statistics_are_known:
                 statistics[statistic_name] = MissingReason.FAILED
         return statistics
 
-    def _gscip_iteration_statistics_available(self, result: SolveResult) -> bool:
-        """Whether GSCIP reports post-presolve iteration statistics."""
+    def _gscip_statistics_availability_is_known(
+        self,
+        result: SolveResult,
+        solve_parameters: SolveParameters | None,
+    ) -> bool:
+        """The GSCIP solve states that establish work-count availability."""
         termination: object = self._guarded_attribute(result, "termination")
+        reason: object = self._guarded_attribute(termination, "reason")
         limit: object = self._guarded_attribute(termination, "limit")
-        if limit is _UNAVAILABLE:
-            return False
-        output: object = self._guarded_attribute(result, "gscip_specific_output")
-        solve_stats: object = self._guarded_attribute(output, "stats")
-        list_fields_method: object = self._guarded_attribute(solve_stats, "ListFields")
-        if not callable(list_fields_method):
-            return False
-        try:
-            fields: object = list_fields_method()
-        except (AttributeError, RuntimeError):
-            return False
-        if not isinstance(fields, list):
-            return False
-        statistic_names: frozenset[str] = frozenset(
-            (
-                "node_count",
-                "total_lp_iterations",
-                "primal_simplex_iterations",
-                "dual_simplex_iterations",
-                "barrier_iterations",
-                "deterministic_time",
-            )
-        )
-        field_descriptor: object
-        field_value: object
-        for field_descriptor, field_value in cast(list[tuple[object, object]], fields):
-            field_name: object = self._guarded_attribute(field_descriptor, "name")
-            if (
-                isinstance(field_name, str)
-                and field_name in statistic_names
-                and isinstance(field_value, (int, float))
-                and not isinstance(field_value, bool)
-                and field_value != 0
-            ):
-                return True
-        return limit is None
+        reason_name: str | None = self._enum_name(reason)
+        limit_name: str | None = self._enum_name(limit)
+        if self._has_solution(result) is True:
+            return True
+        if limit is None and reason_name in {
+            "OPTIMAL",
+            "INFEASIBLE",
+            "UNBOUNDED",
+            "INFEASIBLE_OR_UNBOUNDED",
+        }:
+            return True
+        time_limit: object = self._guarded_attribute(solve_parameters, "time_limit")
+        return limit_name == "TIME" and time_limit == timedelta(0)
 
     def _has_integer_variables(self, model: Model | None) -> bool | None:
         """Whether a MathOpt model contains integer variables."""
