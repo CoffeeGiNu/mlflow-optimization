@@ -43,8 +43,6 @@ class _RecordingContext:
 class SolveRun:
     """The handle of one recorded solve."""
 
-    run_id: str
-
     def __init__(
         self,
         run: RunReference,
@@ -106,8 +104,6 @@ _last_solve: ContextVar[SolveRun | None] = ContextVar("last_solve", default=None
 
 class RecordSolve:
     """The use case that stores each completed solve as one run."""
-
-    options: RecordOptions
 
     def __init__(
         self, runs: RunStore, artifacts: ArtifactStore, options: RecordOptions
