@@ -12,5 +12,8 @@ def warn(message: str, *, stacklevel: int = 2) -> None:
     """Emit an ``MlflowOptimizationWarning``."""
     try:
         warnings.warn(message, MlflowOptimizationWarning, stacklevel=stacklevel + 1)
-    except MlflowOptimizationWarning:
-        logging.getLogger("mlflow_optimization").warning(message)
+    except BaseException:
+        try:
+            logging.getLogger("mlflow_optimization").warning(message)
+        except BaseException:
+            pass
