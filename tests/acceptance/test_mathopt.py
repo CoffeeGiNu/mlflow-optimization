@@ -1,11 +1,13 @@
 """Acceptance tests for the MathOpt integration."""
 
 import math
+from collections.abc import Callable
 
 import pytest
 from conftest import Tracking
 from mlflow.entities import Run
 from ortools.math_opt.python import mathopt
+from ortools.math_opt.python.mathopt import solve
 from ortools.math_opt.python.model import Model
 from ortools.math_opt.python.parameters import SolverType
 from ortools.math_opt.python.variables import Variable
@@ -218,3 +220,23 @@ def test_backend_without_branch_and_bound_nodes_marks_statistic_missing(
 
     assert "node_count" not in run.data.metrics
     assert run.data.tags["optimization.missing.node_count"] == "unsupported"
+
+
+def test_disable_preserves_a_reassigned_solve_name(tracking: Tracking) -> None:
+    global solve
+
+    original_solve: Callable[..., object] = solve
+
+    def user_solve() -> None:
+        return None
+
+    try:
+        autolog(solvers=["mathopt"])
+        solve = user_solve
+
+        autolog(disable=True)
+
+        assert solve is user_solve
+    finally:
+        autolog(disable=True)
+        solve = original_solve

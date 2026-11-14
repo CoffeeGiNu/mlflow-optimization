@@ -53,6 +53,7 @@ class MathOptAdapter:
         ]
         self._rebound_module_names: list[tuple[ModuleType, str]] = []
         self._module_solve_original: object | None = None
+        self._module_solve_replacement: object | None = None
 
     def install(self, observer: SolveObserver) -> None:
         """The installed MathOpt solve hooks."""
@@ -76,14 +77,18 @@ class MathOptAdapter:
                     replacement_module_solve,
                 )
                 self._module_solve_original = original_module_solve
+                self._module_solve_replacement = replacement_module_solve
         except (AttributeError, TypeError):
             if self._module_solve_original is not None:
+                assert self._module_solve_replacement is not None
                 restore_module_names(
                     self._rebound_module_names,
                     self._module_solve_original,
+                    self._module_solve_replacement,
                 )
                 self._rebound_module_names = []
                 self._module_solve_original = None
+                self._module_solve_replacement = None
             for patch in reversed(installed_patches):
                 patch.uninstall()
             raise
@@ -93,12 +98,15 @@ class MathOptAdapter:
         for patch, _ in reversed(self._patches):
             patch.uninstall()
         if self._module_solve_original is not None:
+            assert self._module_solve_replacement is not None
             restore_module_names(
                 self._rebound_module_names,
                 self._module_solve_original,
+                self._module_solve_replacement,
             )
             self._rebound_module_names = []
             self._module_solve_original = None
+            self._module_solve_replacement = None
 
     def _wrap(
         self, original: object, observer: SolveObserver, entry_point: str

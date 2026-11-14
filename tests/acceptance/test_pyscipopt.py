@@ -261,3 +261,24 @@ def test_disabled_autolog_does_not_record_solves(tracking: Tracking) -> None:
     model.optimize()
 
     assert tracking.solve_runs() == []
+
+
+def test_disable_preserves_a_user_model_subclass_binding(tracking: Tracking) -> None:
+    global Model
+
+    original_model: type[Any] = Model
+    try:
+        autolog(solvers=["pyscipopt"])
+
+        class Model(Model):
+            """A user-defined PySCIPOpt model."""
+
+        user_model: type[Any] = Model
+        autolog(disable=True)
+
+        model: Any = Model()
+
+        assert isinstance(model, user_model)
+    finally:
+        autolog(disable=True)
+        Model = original_model

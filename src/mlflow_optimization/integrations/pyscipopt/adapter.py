@@ -119,7 +119,7 @@ class PyScipOptAdapter:
         assert self._logging_model is not None
         original_model: type[Any] = self._original_model
         logging_model: type[Any] = self._logging_model
-        restore_module_names(self._rebound_names, original_model)
+        restore_module_names(self._rebound_names, original_model, logging_model)
         rebind_module_names(logging_model, original_model)
 
         self._installed = False

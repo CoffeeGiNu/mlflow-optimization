@@ -41,10 +41,14 @@ def rebind_module_names(
 def restore_module_names(
     rebound_names: list[tuple[ModuleType, str]],
     original: Any,
+    replacement: Any,
 ) -> None:
-    """The restoration of module-level names changed by rebind_module_names."""
+    """A conditional restoration of module-level names."""
     for module, name in reversed(rebound_names):
-        vars(module)[name] = original
+        module_values: dict[str, Any] = vars(module)
+        if name not in module_values or module_values[name] is not replacement:
+            continue
+        module_values[name] = original
 
 
 class Patch:
