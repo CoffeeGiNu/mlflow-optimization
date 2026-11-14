@@ -47,6 +47,68 @@ def test_optimal_mip_is_recorded(tracking: Tracking) -> None:
     assert "optimization.missing.objective_value" not in solve_run.data.tags
 
 
+def test_failed_call_after_success_does_not_record_stale_results(
+    tracking: Tracking,
+) -> None:
+    autolog(solvers=["gurobipy"])
+    model: gurobipy.Model = _new_model()
+    variable: gurobipy.Var = model.addVar(vtype=gurobipy.GRB.BINARY)
+    model.setObjective(variable, gurobipy.GRB.MAXIMIZE)
+    model.optimize()
+
+    with pytest.raises(TypeError):
+        model.optimize(unexpected=True)
+
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 2
+    assert runs[0].data.metrics["objective_value"] == 1
+    for metric_name in (
+        "objective_value",
+        "dual_bound",
+        "solver_time_seconds",
+        "node_count",
+    ):
+        assert metric_name not in runs[1].data.metrics
+
+
+@pytest.mark.parametrize("sense", (gurobipy.GRB.MINIMIZE, gurobipy.GRB.MAXIMIZE))
+def test_limited_mip_bound_has_correct_direction(
+    tracking: Tracking, sense: int
+) -> None:
+    autolog(solvers=["gurobipy"])
+    model: gurobipy.Model = _new_model()
+    model.Params.Presolve = 0
+    model.Params.NodeLimit = 1
+    model.Params.Heuristics = 0
+    model.Params.Cuts = 0
+    variables: gurobipy.tupledict[int, gurobipy.Var] = model.addVars(
+        60, vtype=gurobipy.GRB.BINARY
+    )
+    for constraint_index in range(5):
+        model.addConstr(
+            sum(
+                ((index * 17 + constraint_index * 13) % 31 + 1) * variables[index]
+                for index in range(60)
+            )
+            <= 180
+        )
+    model.setObjective(
+        -sense * sum((index * 11 % 37 + 1) * variables[index] for index in range(60)),
+        sense,
+    )
+    for variable in variables.values():
+        variable.Start = 0
+
+    model.optimize()
+
+    assert model.Status == gurobipy.GRB.NODE_LIMIT
+    run: Run = _recorded_run(tracking)
+    objective: float = run.data.metrics["objective_value"]
+    bound: float = run.data.metrics["dual_bound"]
+    assert (objective - bound) * sense > 0
+    assert run.data.metrics["absolute_gap"] == pytest.approx(abs(objective - bound))
+
+
 def test_infeasible_mip_has_no_objective_value(tracking: Tracking) -> None:
     autolog(solvers=["gurobipy"])
     model: gurobipy.Model = _new_model()
@@ -190,12 +252,10 @@ def test_explicit_parameter_is_recorded_without_paths_or_secrets(
     autolog(solvers=["gurobipy"])
     log_file: Path = tmp_path / "gurobi.log"
     secret: str = "acceptance-test-secret"
-    environment: gurobipy.Env
     with gurobipy.Env(empty=True) as environment:
         environment.setParam("OutputFlag", 0)
         environment.setParam("CSAPISecret", secret)
         environment.start()
-        model: gurobipy.Model
         with gurobipy.Model(env=environment) as model:
             model.Params.MIPGap = 0.2
             model.Params.LogFile = str(log_file)
