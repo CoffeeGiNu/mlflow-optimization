@@ -27,7 +27,7 @@ def classify_outcome(
     else:
         if termination is Termination.OPTIMAL and has_objective is False:
             termination = Termination.FEASIBLE
-        elif termination is Termination.FEASIBLE and reported.has_solution is False:
+        if termination is Termination.FEASIBLE and reported.has_solution is False:
             warn("Reported feasible termination conflicts with has_solution=False.")
             termination = Termination.UNKNOWN
         elif termination is Termination.OPTIMAL and reported.has_solution is False:
