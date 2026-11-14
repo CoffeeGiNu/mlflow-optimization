@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from functools import wraps
+from inspect import BoundArguments, signature
 from typing import Any
 
 import ortools
@@ -26,25 +27,16 @@ from mlflow_optimization.features.metrics.types import (
 )
 from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
 
-_STATUS_NAMES: dict[int, str] = {
-    0: "ROUTING_NOT_SOLVED",
-    1: "ROUTING_SUCCESS",
-    2: "ROUTING_PARTIAL_SUCCESS_LOCAL_OPTIMUM_NOT_REACHED",
-    3: "ROUTING_FAIL",
-    4: "ROUTING_FAIL_TIMEOUT",
-    5: "ROUTING_INVALID",
-    6: "ROUTING_INFEASIBLE",
-    7: "ROUTING_OPTIMAL",
-}
-_STATUS_TERMINATIONS: dict[int, Termination] = {
-    0: Termination.UNKNOWN,
-    1: Termination.FEASIBLE,
-    2: Termination.FEASIBLE,
-    3: Termination.UNKNOWN,
-    4: Termination.TIME_LIMIT,
-    5: Termination.ERROR,
-    6: Termination.INFEASIBLE,
-    7: Termination.OPTIMAL,
+_SDK_EXCEPTION: type[Exception] = Exception
+_STATUSES: dict[int, tuple[str, Termination]] = {
+    0: ("ROUTING_NOT_SOLVED", Termination.UNKNOWN),
+    1: ("ROUTING_SUCCESS", Termination.FEASIBLE),
+    2: ("ROUTING_PARTIAL_SUCCESS_LOCAL_OPTIMUM_NOT_REACHED", Termination.FEASIBLE),
+    3: ("ROUTING_FAIL", Termination.UNKNOWN),
+    4: ("ROUTING_FAIL_TIMEOUT", Termination.TIME_LIMIT),
+    5: ("ROUTING_INVALID", Termination.ERROR),
+    6: ("ROUTING_INFEASIBLE", Termination.INFEASIBLE),
+    7: ("ROUTING_OPTIMAL", Termination.OPTIMAL),
 }
 _ENTRY_POINTS: tuple[str, ...] = (
     "SolveWithParameters",
@@ -63,78 +55,82 @@ def _explicit_parameters(
 ) -> list[SolverParameter]:
     """Scalar values that differ from OR-Tools search defaults."""
     parameters: list[SolverParameter] = []
-    fields: Any = ()
-    fields_available: bool = False
     try:
-        fields = actual.DESCRIPTOR.fields
-        fields_available = True
-    except AttributeError:
-        fields_available = False
-    if not fields_available:
+        fields: Any = actual.DESCRIPTOR.fields
+    except _SDK_EXCEPTION:
         return parameters
-    field: Any
     for field in fields:
-        parameter_name: str = f"{prefix}.{field.name}" if prefix else field.name
-        actual_value_available: bool = False
-        actual_value: Any = None
         try:
-            actual_value = getattr(actual, field.name)
-            actual_value_available = True
-        except AttributeError:
-            actual_value_available = False
-        default_value_available: bool = False
-        default_value: Any = None
-        try:
-            default_value = getattr(defaults, field.name)
-            default_value_available = True
-        except AttributeError:
-            default_value_available = False
-        if not actual_value_available or not default_value_available:
+            field_name: str = field.name
+        except _SDK_EXCEPTION:
             continue
-        if field.is_repeated:
-            actual_values_available: bool = False
-            actual_values: list[Any] = []
+        parameter_name: str = f"{prefix}.{field_name}" if prefix else field_name
+        try:
+            actual_value: Any = getattr(actual, field_name)
+        except _SDK_EXCEPTION:
+            continue
+        try:
+            default_value: Any = getattr(defaults, field_name)
+        except _SDK_EXCEPTION:
+            continue
+        try:
+            is_repeated: bool = bool(field.is_repeated)
+        except _SDK_EXCEPTION:
+            continue
+        if is_repeated:
             try:
-                actual_values = list(actual_value)
-                actual_values_available = True
-            except TypeError:
-                actual_values_available = False
-            default_values_available: bool = False
-            default_values: list[Any] = []
+                actual_values: list[Any] = list(actual_value)
+            except _SDK_EXCEPTION:
+                continue
             try:
-                default_values = list(default_value)
-                default_values_available = True
-            except TypeError:
-                default_values_available = False
-            if not actual_values_available or not default_values_available:
+                default_values: list[Any] = list(default_value)
+            except _SDK_EXCEPTION:
                 continue
             if actual_values != default_values:
+                try:
+                    actual_values_string: str = str(actual_values)
+                except _SDK_EXCEPTION:
+                    continue
                 parameters.append(
                     SolverParameter(
                         parameter_name,
-                        str(actual_values),
+                        actual_values_string,
                         ParameterOrigin.EXPLICIT,
                     )
                 )
-        elif field.message_type is not None:
+            continue
+        try:
+            message_type: Any | None = field.message_type
+        except _SDK_EXCEPTION:
+            continue
+        if message_type is not None:
             parameters.extend(
                 _explicit_parameters(actual_value, default_value, parameter_name)
             )
-        elif actual_value != default_value:
-            if field.enum_type is not None:
-                enum_value: Any = field.enum_type.values_by_number.get(actual_value)
-                value: int | float | bool | str = (
-                    enum_value.name if enum_value is not None else actual_value
-                )
-            else:
-                value = actual_value
+            continue
+        try:
+            differs_from_default: bool = actual_value != default_value
+        except _SDK_EXCEPTION:
+            continue
+        if differs_from_default:
+            try:
+                enum_type: Any | None = field.enum_type
+            except _SDK_EXCEPTION:
+                continue
+            value: int | float | bool | str = actual_value
+            if enum_type is not None:
+                try:
+                    enum_value: Any = enum_type.values_by_number.get(actual_value)
+                except _SDK_EXCEPTION:
+                    continue
+                if enum_value is not None:
+                    try:
+                        value = enum_value.name
+                    except _SDK_EXCEPTION:
+                        continue
             if isinstance(value, (int, float, bool, str)):
                 parameters.append(
-                    SolverParameter(
-                        parameter_name,
-                        value,
-                        ParameterOrigin.EXPLICIT,
-                    )
+                    SolverParameter(parameter_name, value, ParameterOrigin.EXPLICIT)
                 )
     return parameters
 
@@ -151,7 +147,6 @@ class Integration(SolverIntegration):
         """The solve hooks installed on the Routing model."""
         if self._patches:
             return
-        entry_point: str
         for entry_point in _ENTRY_POINTS:
             if hasattr(pywrapcp.RoutingModel, entry_point):
                 patch: Patch = Patch(pywrapcp.RoutingModel, entry_point)
@@ -160,7 +155,6 @@ class Integration(SolverIntegration):
 
     def uninstall(self) -> None:
         """The original solve hooks after uninstall."""
-        patch: Patch
         for patch in reversed(self._patches):
             patch.uninstall()
         self._patches.clear()
@@ -175,11 +169,17 @@ class Integration(SolverIntegration):
         def factory(original: Any) -> Any:
             @wraps(original)
             def wrapped(*args: Any, **kwargs: Any) -> Any:
+                call_observer: SolveObserver = observer
                 routing_model: pywrapcp.RoutingModel = receiver_of(
                     original, args, kwargs
                 )
+                if routing_model is None:
+                    return original(*args, **kwargs)
+                counter_snapshot: tuple[float | None, float | None] = (
+                    self._counter_snapshot(routing_model)
+                )
                 search_parameters: Any | None = self._search_parameters(
-                    entry_point,
+                    original,
                     args,
                     kwargs,
                 )
@@ -192,10 +192,14 @@ class Integration(SolverIntegration):
                     error: BaseException | None,
                 ) -> SolveObservation:
                     return self._extract(
-                        routing_model, result, error, search_parameters
+                        routing_model,
+                        result,
+                        error,
+                        search_parameters,
+                        counter_snapshot,
                     )
 
-                return observer.observe(self.api, call, extract)
+                return call_observer.observe(self.api, call, extract)
 
             return wrapped
 
@@ -203,26 +207,36 @@ class Integration(SolverIntegration):
 
     def _search_parameters(
         self,
-        entry_point: str,
+        original: Callable[..., Any],
         arguments: tuple[Any, ...],
         keyword_arguments: dict[str, Any],
     ) -> Any | None:
         """Search parameters for one Routing solve call."""
-        if entry_point in ("SolveWithParameters", "SolveWithIteratedLocalSearch"):
-            parameter_position: int = 0
-        elif entry_point in (
-            "SolveFromAssignmentWithParameters",
-            "SolveFromAssignmentsWithParameters",
-            "FastSolveFromAssignmentWithParameters",
-        ):
-            parameter_position = 1
-        else:
+        bound_arguments: BoundArguments
+        try:
+            bound_arguments = signature(original).bind_partial(
+                *arguments, **keyword_arguments
+            )
+        except (TypeError, ValueError):
             return None
-        if "search_parameters" in keyword_arguments:
-            return keyword_arguments["search_parameters"]
-        if parameter_position < len(arguments):
-            return arguments[parameter_position]
-        return None
+        return bound_arguments.arguments.get("search_parameters")
+
+    def _counter_snapshot(
+        self,
+        routing_model: pywrapcp.RoutingModel,
+    ) -> tuple[float | None, float | None]:
+        """The branch and failure counters for one Routing model."""
+        branches: float | None = None
+        try:
+            branches = float(routing_model.solver().Branches())
+        except _SDK_EXCEPTION:
+            branches = None
+        failures: float | None = None
+        try:
+            failures = float(routing_model.solver().Failures())
+        except _SDK_EXCEPTION:
+            failures = None
+        return branches, failures
 
     def _extract(
         self,
@@ -230,137 +244,179 @@ class Integration(SolverIntegration):
         result: Any | None,
         error: BaseException | None,
         search_parameters: Any | None,
+        counter_snapshot: tuple[float | None, float | None],
     ) -> SolveObservation:
         """The plain observation values reported by one Routing solve."""
+        try:
+            return self._build_observation(
+                routing_model,
+                result,
+                error,
+                search_parameters,
+                counter_snapshot,
+            )
+        except ObservationError:
+            raise
+        except _SDK_EXCEPTION as extraction_error:
+            raise ObservationError(
+                "Could not read a Routing observation."
+            ) from extraction_error
+
+    def _build_observation(
+        self,
+        routing_model: pywrapcp.RoutingModel,
+        result: Any | None,
+        error: BaseException | None,
+        search_parameters: Any | None,
+        counter_snapshot: tuple[float | None, float | None],
+    ) -> SolveObservation:
+        """The Routing solve observation."""
         status_code: int | None = None
         raw_status: str = "unknown"
         termination: Termination = Termination.UNKNOWN
-        try:
-            status_code = int(routing_model.status())
-        except (AttributeError, RuntimeError):
-            status_code = None
-        if status_code is not None:
-            status_name: str = _STATUS_NAMES.get(status_code, "UNKNOWN")
-            raw_status = f"{status_name} ({status_code})"
-            termination = _STATUS_TERMINATIONS.get(status_code, Termination.UNKNOWN)
         if error is not None:
             termination = (
                 Termination.INTERRUPTED
                 if isinstance(error, KeyboardInterrupt)
                 else Termination.ERROR
             )
-        elif result is not None:
-            termination = (
-                Termination.OPTIMAL if status_code == 7 else Termination.FEASIBLE
-            )
-        has_solution: bool | None = result is not None if error is None else None
-        objective_value: float | MissingReason
-        if result is None:
-            objective_value = (
-                MissingReason.NO_SOLUTION if error is None else MissingReason.FAILED
-            )
         else:
-            objective_value = MissingReason.FAILED
             try:
-                objective_value = float(result.ObjectiveValue())
-            except (AttributeError, RuntimeError):
-                objective_value = MissingReason.FAILED
-        solver_time_seconds: float | MissingReason = MissingReason.UNSUPPORTED
-        statistics: dict[str, float | MissingReason] = {}
-        native: dict[str, float] = {}
-        branches: float | None = None
-        try:
-            branches = float(routing_model.solver().Branches())
-        except (AttributeError, RuntimeError):
-            branches = None
-        if branches is not None:
-            native["branches"] = branches
-        failures: float | None = None
-        try:
-            failures = float(routing_model.solver().Failures())
-        except (AttributeError, RuntimeError):
-            failures = None
-        if failures is not None:
-            native["failures"] = failures
+                status_code = int(routing_model.status())
+            except _SDK_EXCEPTION:
+                status_code = None
+            if status_code is not None:
+                status_name: str
+                termination = Termination.UNKNOWN
+                status_name, termination = _STATUSES.get(
+                    status_code, ("UNKNOWN", Termination.UNKNOWN)
+                )
+                raw_status = f"{status_name} ({status_code})"
+            if result is not None:
+                termination = (
+                    Termination.OPTIMAL if status_code == 7 else Termination.FEASIBLE
+                )
+        if error is not None:
+            metrics: ReportedMetrics = ReportedMetrics()
+        else:
+            metrics = self._metrics(
+                routing_model,
+                result,
+                counter_snapshot,
+            )
         problem: dict[str, int] = {}
         num_locations: int | None = None
         try:
             num_locations = int(routing_model.nodes())
-        except (AttributeError, RuntimeError):
+        except _SDK_EXCEPTION:
             num_locations = None
         if num_locations is not None:
             problem["num_locations"] = num_locations
         vehicle_count: int | None = None
         try:
             vehicle_count = int(routing_model.vehicles())
-        except (AttributeError, RuntimeError):
+        except _SDK_EXCEPTION:
             vehicle_count = None
         if vehicle_count is not None:
             problem["num_vehicles"] = vehicle_count
-        if result is not None and vehicle_count is not None:
-            vehicles_used: int = 0
-            vehicle_reads_succeeded: bool = True
-            vehicle_index: int
-            for vehicle_index in range(vehicle_count):
-                vehicle_read_succeeded: bool = False
-                is_vehicle_used: bool = False
-                try:
-                    is_vehicle_used = bool(
-                        routing_model.IsVehicleUsed(result, vehicle_index)
-                    )
-                    vehicle_read_succeeded = True
-                except (AttributeError, RuntimeError, TypeError):
-                    vehicle_read_succeeded = False
-                if not vehicle_read_succeeded:
-                    vehicle_reads_succeeded = False
-                elif is_vehicle_used:
-                    vehicles_used += 1
-            if vehicle_reads_succeeded:
-                native["vehicles_used"] = float(vehicles_used)
-        if search_parameters is None:
-            try:
-                search_parameters = pywrapcp.DefaultRoutingSearchParameters()
-            except (AttributeError, RuntimeError):
-                search_parameters = None
-        parameters: list[SolverParameter] = []
-        if search_parameters is not None:
-            defaults: Any | None = None
-            try:
-                defaults = pywrapcp.DefaultRoutingSearchParameters()
-            except (AttributeError, RuntimeError):
-                defaults = None
-            if defaults is not None:
-                parameters = _explicit_parameters(search_parameters, defaults)
+        parameters: list[SolverParameter] = self._reported_parameters(search_parameters)
         api_version: str | None = None
         try:
             api_version = str(ortools.__version__)
-        except AttributeError:
+        except _SDK_EXCEPTION:
             api_version = None
-        construction_error: TypeError | ValueError
-        try:
-            observation: SolveObservation = SolveObservation(
-                api=self.api,
-                outcome=ReportedOutcome(raw_status, termination, has_solution),
-                metrics=ReportedMetrics(
-                    has_objective=True,
-                    sense=ObjectiveSense.MINIMIZE,
-                    objective_value=objective_value,
-                    dual_bound=MissingReason.UNSUPPORTED,
-                    solver_time_seconds=solver_time_seconds,
-                    statistics=statistics,
-                    native=native,
-                ),
-                metadata=ReportedMetadata(
-                    solver="routing",
-                    api_version=api_version,
-                    solver_version=api_version,
-                    problem=problem,
-                    parameters=parameters,
-                    wall_time_includes_problem_build=False,
-                ),
-            )
-        except (TypeError, ValueError) as construction_error:
-            raise ObservationError(
-                "Could not build a Routing observation."
-            ) from construction_error
+        observation: SolveObservation = SolveObservation(
+            api=self.api,
+            outcome=ReportedOutcome(
+                raw_status,
+                termination,
+                result is not None if error is None else None,
+            ),
+            metrics=metrics,
+            metadata=ReportedMetadata(
+                solver="routing",
+                api_version=api_version,
+                solver_version=api_version,
+                problem=problem,
+                parameters=parameters,
+                wall_time_includes_problem_build=False,
+            ),
+        )
         return observation
+
+    def _metrics(
+        self,
+        routing_model: pywrapcp.RoutingModel,
+        result: Any | None,
+        counter_snapshot: tuple[float | None, float | None],
+    ) -> ReportedMetrics:
+        """The Routing metrics reported for a successful solve call."""
+        objective_value: float | MissingReason
+        if result is None:
+            objective_value = MissingReason.NO_SOLUTION
+        else:
+            try:
+                objective_value = float(result.ObjectiveValue())
+            except _SDK_EXCEPTION:
+                objective_value = MissingReason.FAILED
+        solver_time_seconds: float | MissingReason = MissingReason.UNSUPPORTED
+        statistics: dict[str, float | MissingReason] = {}
+        native: dict[str, float] = {}
+        branches_before: float | None = counter_snapshot[0]
+        failures_before: float | None = counter_snapshot[1]
+        branches_after: float | None
+        failures_after: float | None
+        branches_after, failures_after = self._counter_snapshot(routing_model)
+        if branches_before is not None and branches_after is not None:
+            branches_elapsed: float = branches_after - branches_before
+            if branches_elapsed >= 0:
+                native["branches"] = branches_elapsed
+        if failures_before is not None and failures_after is not None:
+            failures_elapsed: float = failures_after - failures_before
+            if failures_elapsed >= 0:
+                native["failures"] = failures_elapsed
+        vehicle_count: int | None = None
+        try:
+            vehicle_count = int(routing_model.vehicles())
+        except _SDK_EXCEPTION:
+            vehicle_count = None
+        if result is not None and vehicle_count is not None:
+            vehicles_used: int = 0
+            vehicle_reads_succeeded: bool = True
+            for vehicle_index in range(vehicle_count):
+                try:
+                    is_vehicle_used: bool = bool(
+                        routing_model.IsVehicleUsed(result, vehicle_index)
+                    )
+                except _SDK_EXCEPTION:
+                    vehicle_reads_succeeded = False
+                    continue
+                if is_vehicle_used:
+                    vehicles_used += 1
+            if vehicle_reads_succeeded:
+                native["vehicles_used"] = float(vehicles_used)
+        return ReportedMetrics(
+            has_objective=True,
+            sense=ObjectiveSense.MINIMIZE,
+            objective_value=objective_value,
+            dual_bound=MissingReason.UNSUPPORTED,
+            solver_time_seconds=solver_time_seconds,
+            statistics=statistics,
+            native=native,
+        )
+
+    def _reported_parameters(
+        self,
+        search_parameters: Any | None,
+    ) -> list[SolverParameter]:
+        """The explicit Routing search parameters reported for one call."""
+        parameters: list[SolverParameter] = []
+        if search_parameters is None:
+            return parameters
+        defaults: Any | None = None
+        try:
+            defaults = pywrapcp.DefaultRoutingSearchParameters()
+        except _SDK_EXCEPTION:
+            return parameters
+        parameters = _explicit_parameters(search_parameters, defaults)
+        return parameters
