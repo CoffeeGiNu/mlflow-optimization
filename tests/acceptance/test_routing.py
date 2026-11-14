@@ -49,6 +49,68 @@ def test_routing_unsuccessful_statuses(
     assert "objective_value" not in runs[0].data.metrics
 
 
+def test_routing_fast_failed_assignment_is_not_recorded_as_a_solution(
+    tracking: Tracking,
+) -> None:
+    autolog(solvers=["routing"])
+    routing_index_manager: pywrapcp.RoutingIndexManager = pywrapcp.RoutingIndexManager(
+        6, 1, 0
+    )
+    routing_model: pywrapcp.RoutingModel = pywrapcp.RoutingModel(
+        routing_index_manager
+    )
+
+    def arc_cost(from_index: int, to_index: int) -> int:
+        from_location: int = routing_index_manager.IndexToNode(from_index)
+        to_location: int = routing_index_manager.IndexToNode(to_index)
+        return (
+            (17 * from_location + 11 * to_location + 7 * from_location * to_location)
+            % 31
+        ) + 1
+
+    transit_callback_index: int = routing_model.RegisterTransitCallback(arc_cost)
+    routing_model.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
+    search_parameters: routing_parameters_pb2.RoutingSearchParameters = (
+        pywrapcp.DefaultRoutingSearchParameters()
+    )
+    search_parameters.first_solution_strategy = (
+        routing_enums_pb2.FirstSolutionStrategy.BEST_INSERTION
+    )
+    search_parameters.solution_limit = 1
+    assignment: pywrapcp.Assignment | None = routing_model.SolveWithParameters(
+        search_parameters
+    )
+
+    assert assignment is not None
+    start_index: int = routing_model.Start(0)
+    node_one_index: int = routing_index_manager.NodeToIndex(1)
+    routing_model.solver().Add(
+        routing_model.NextVar(start_index) + routing_model.NextVar(node_one_index) != 7
+    )
+    fast_assignment: pywrapcp.Assignment | None = (
+        routing_model.FastSolveFromAssignmentWithParameters(
+            assignment,
+            search_parameters,
+            True,
+        )
+    )
+
+    assert fast_assignment is not None
+    assert routing_model.status() == 3
+    assert (
+        fast_assignment.Value(routing_model.NextVar(start_index))
+        + fast_assignment.Value(routing_model.NextVar(node_one_index))
+        == 7
+    )
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 2
+    run: Run = runs[1]
+    assert run.data.tags["optimization.raw_status"] == "ROUTING_FAIL (3)"
+    assert run.data.tags["optimization.termination"] == "unknown"
+    assert run.data.tags["optimization.has_solution"] == "false"
+    assert "objective_value" not in run.data.metrics
+
+
 def test_repeated_routing_solves_record_counter_deltas(tracking: Tracking) -> None:
     autolog(solvers=["routing"])
     manager: pywrapcp.RoutingIndexManager = pywrapcp.RoutingIndexManager(4, 1, 0)

@@ -38,6 +38,7 @@ _STATUSES: dict[int, tuple[str, Termination]] = {
     6: ("ROUTING_INFEASIBLE", Termination.INFEASIBLE),
     7: ("ROUTING_OPTIMAL", Termination.OPTIMAL),
 }
+_FAILED_STATUS_CODES: frozenset[int] = frozenset({3, 4, 5, 6})
 _ENTRY_POINTS: tuple[str, ...] = (
     "SolveWithParameters",
     "Solve",
@@ -274,6 +275,8 @@ class RoutingAdapter(SolverIntegration):
         status_code: int | None = None
         raw_status: str = "unknown"
         termination: Termination = Termination.UNKNOWN
+        has_solution: bool | None = None
+        reported_result: Any | None = result
         if error is not None:
             termination = (
                 Termination.INTERRUPTED
@@ -292,7 +295,11 @@ class RoutingAdapter(SolverIntegration):
                     status_code, ("UNKNOWN", Termination.UNKNOWN)
                 )
                 raw_status = f"{status_name} ({status_code})"
-            if result is not None:
+            has_solution = result is not None
+            if status_code in _FAILED_STATUS_CODES:
+                has_solution = False
+                reported_result = None
+            elif result is not None:
                 termination = (
                     Termination.OPTIMAL if status_code == 7 else Termination.FEASIBLE
                 )
@@ -301,7 +308,7 @@ class RoutingAdapter(SolverIntegration):
         else:
             metrics = self._metrics(
                 routing_model,
-                result,
+                reported_result,
                 counter_snapshot,
             )
         problem: dict[str, int] = {}
@@ -330,7 +337,7 @@ class RoutingAdapter(SolverIntegration):
             outcome=ReportedOutcome(
                 raw_status,
                 termination,
-                result is not None if error is None else None,
+                has_solution,
             ),
             metrics=metrics,
             metadata=ReportedMetadata(
