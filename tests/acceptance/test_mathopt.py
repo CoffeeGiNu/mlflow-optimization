@@ -1,5 +1,7 @@
 """Acceptance tests for the MathOpt integration."""
 
+import math
+
 import pytest
 from conftest import Tracking
 from mlflow.entities import Run
@@ -94,9 +96,7 @@ def test_infeasible_problem_records_no_objective_value(tracking: Tracking) -> No
     assert run.data.tags["optimization.termination"] == "infeasible"
     assert run.data.tags["optimization.has_solution"] == "false"
     assert "objective_value" not in run.data.metrics
-    assert (
-        run.data.tags["optimization.missing.objective_value"] == "no_solution"
-    )
+    assert run.data.tags["optimization.missing.objective_value"] == "no_solution"
 
 
 def test_unbounded_problem_keeps_feasible_solution_and_omits_infinite_bound(
@@ -135,6 +135,58 @@ def test_objective_and_bound_follow_objective_direction(
         assert objective_value <= dual_bound
     else:
         assert objective_value >= dual_bound
+
+
+@pytest.mark.parametrize("maximize", (False, True))
+def test_node_limit_records_nonzero_gap(tracking: Tracking, maximize: bool) -> None:
+    autolog(solvers=["mathopt"])
+    model: Model = Model()
+    variables: list[Variable] = [
+        model.add_binary_variable(name=f"value_{index}") for index in range(60)
+    ]
+    for constraint_index in range(5):
+        model.add_linear_constraint(
+            sum(
+                ((index * 17 + constraint_index * 13) % 31 + 1) * variables[index]
+                for index in range(60)
+            )
+            <= 180
+        )
+    expression: mathopt.LinearBase = sum(
+        (index * 11 % 37 + 1) * variables[index] for index in range(60)
+    )
+    if maximize:
+        model.maximize(expression)
+    else:
+        model.minimize(-expression)
+    parameters: mathopt.SolveParameters = mathopt.SolveParameters(
+        node_limit=1,
+        presolve=mathopt.Emphasis.OFF,
+        cuts=mathopt.Emphasis.OFF,
+        heuristics=mathopt.Emphasis.OFF,
+    )
+    model_parameters: mathopt.ModelSolveParameters = mathopt.ModelSolveParameters(
+        solution_hints=[
+            mathopt.SolutionHint(
+                variable_values={variable: 0.0 for variable in variables}
+            )
+        ]
+    )
+
+    result: mathopt.SolveResult = mathopt.solve(
+        model, SolverType.GSCIP, params=parameters, model_params=model_parameters
+    )
+
+    assert result.termination.reason == mathopt.TerminationReason.FEASIBLE
+    assert result.termination.limit == mathopt.Limit.NODE
+    run: Run = _single_solve_run(tracking)
+    objective: float = run.data.metrics["objective_value"]
+    bound: float = run.data.metrics["dual_bound"]
+    assert math.isfinite(objective) and math.isfinite(bound)
+    assert objective == pytest.approx(result.objective_value())
+    assert bound == pytest.approx(result.dual_bound())
+    assert (1 if maximize else -1) * (bound - objective) > 0
+    assert run.data.metrics["absolute_gap"] == pytest.approx(abs(objective - bound))
 
 
 def test_different_mathopt_backends_have_distinct_engine_tags(

@@ -6,6 +6,7 @@ from datetime import timedelta
 from enum import Enum
 from functools import wraps
 from inspect import Signature, signature
+from types import ModuleType
 from typing import cast
 
 import ortools
@@ -14,9 +15,13 @@ from ortools.math_opt.python import solve as mathopt_solve
 from ortools.math_opt.python.model import Model
 from ortools.math_opt.python.parameters import SolveParameters, SolverType
 from ortools.math_opt.python.result import SolveResult
-from ortools.math_opt.python.solve import StatusNotOk
 
-from mlflow_optimization.common.patching import Patch, receiver_of
+from mlflow_optimization.common.patching import (
+    Patch,
+    rebind_module_names,
+    receiver_of,
+    restore_module_names,
+)
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
 from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.metadata.types import (
@@ -32,6 +37,7 @@ from mlflow_optimization.features.metrics.types import (
 from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
 
 ParameterValue = int | float | str | bool
+_SDK_EXCEPTION: type[Exception] = Exception
 _UNAVAILABLE: object = object()
 
 
@@ -43,15 +49,15 @@ class Integration:
     def __init__(self) -> None:
         self._patches: list[tuple[Patch, str]] = [
             (Patch(mathopt, "solve"), "function"),
-            (Patch(mathopt_solve, "solve"), "function"),
             (Patch(mathopt_solve.IncrementalSolver, "solve"), "incremental"),
         ]
+        self._rebound_module_names: list[tuple[ModuleType, str]] = []
+        self._module_solve_original: object | None = None
 
     def install(self, observer: SolveObserver) -> None:
         """The installed MathOpt solve hooks."""
         installed_patches: list[Patch] = []
-        patch: Patch
-        entry_point: str
+        original_module_solve: object = mathopt.solve
         try:
             for patch, entry_point in self._patches:
 
@@ -63,17 +69,36 @@ class Integration:
 
                 patch.install(create_wrapper)
                 installed_patches.append(patch)
+            replacement_module_solve: object = mathopt.solve
+            if replacement_module_solve is not original_module_solve:
+                self._rebound_module_names = rebind_module_names(
+                    original_module_solve,
+                    replacement_module_solve,
+                )
+                self._module_solve_original = original_module_solve
         except (AttributeError, TypeError):
-            patch: Patch
+            if self._module_solve_original is not None:
+                restore_module_names(
+                    self._rebound_module_names,
+                    self._module_solve_original,
+                )
+                self._rebound_module_names = []
+                self._module_solve_original = None
             for patch in reversed(installed_patches):
                 patch.uninstall()
             raise
 
     def uninstall(self) -> None:
         """The restored MathOpt solve hooks."""
-        patch: Patch
         for patch, _ in reversed(self._patches):
             patch.uninstall()
+        if self._module_solve_original is not None:
+            restore_module_names(
+                self._rebound_module_names,
+                self._module_solve_original,
+            )
+            self._rebound_module_names = []
+            self._module_solve_original = None
 
     def _wrap(
         self, original: object, observer: SolveObserver, entry_point: str
@@ -84,13 +109,16 @@ class Integration:
 
         @wraps(original_solve)
         def wrapped_solve(*args: object, **kwargs: object) -> SolveResult:
-            call_signature: Signature = signature(original_solve)
-            call_signature.bind(*args, **kwargs)
+            active_observer: SolveObserver = observer
             receiver: object = (
                 receiver_of(original_solve, args, kwargs)
                 if entry_point == "incremental"
                 else _UNAVAILABLE
             )
+            if entry_point == "incremental" and receiver is None:
+                return original_solve(*args, **kwargs)
+            call_signature: Signature = signature(original_solve)
+            call_signature.bind(*args, **kwargs)
 
             def call() -> SolveResult:
                 return original_solve(*args, **kwargs)
@@ -108,7 +136,7 @@ class Integration:
                     receiver,
                 )
 
-            return observer.observe(self.api, call, extract)
+            return active_observer.observe(self.api, call, extract)
 
         return wrapped_solve
 
@@ -123,6 +151,9 @@ class Integration:
     ) -> SolveObservation:
         """The solver-independent snapshot of one MathOpt result."""
         try:
+            safe_result: SolveResult | None = (
+                None if solve_error is not None else result
+            )
             solver_type: SolverType | None = self._solver_type(
                 entry_point,
                 call_arguments,
@@ -135,9 +166,9 @@ class Integration:
             solve_parameters: SolveParameters | None = self._solve_parameters(
                 call_keywords
             )
-            outcome: ReportedOutcome = self._outcome(result, solve_error)
+            outcome: ReportedOutcome = self._outcome(safe_result, solve_error)
             metrics: ReportedMetrics = self._metrics(
-                result,
+                safe_result,
                 model,
                 solver_type,
                 solve_parameters,
@@ -147,15 +178,7 @@ class Integration:
                 solver_type, model, solve_parameters
             )
             return SolveObservation(self.api, outcome, metrics, metadata)
-        except (
-            AttributeError,
-            IndexError,
-            KeyError,
-            RuntimeError,
-            StatusNotOk,
-            TypeError,
-            ValueError,
-        ) as error:
+        except _SDK_EXCEPTION as error:
             raise ObservationError("MathOpt observation could not be built") from error
 
     def _solver_type(
@@ -228,7 +251,7 @@ class Integration:
         """Whether a MathOpt result contains a primal feasible solution."""
         try:
             return result.has_primal_feasible_solution()
-        except (AttributeError, IndexError, RuntimeError):
+        except _SDK_EXCEPTION:
             return None
 
     def _raw_status(
@@ -301,7 +324,7 @@ class Integration:
             solver_time_seconds: float | MissingReason = MissingReason.UNSUPPORTED
         else:
             objective_value = self._objective_value(result, has_solution)
-            dual_bound = self._numeric_result_value(result, "dual_bound")
+            dual_bound = self._numeric_result_value(result)
             solver_time_seconds = self._solver_time(result)
         statistics: dict[str, float | MissingReason] = self._statistics(
             result,
@@ -327,11 +350,11 @@ class Integration:
         objective: object = self._guarded_attribute(model, "objective")
         try:
             linear_terms: object = tuple(objective.linear_terms())
-        except (AttributeError, RuntimeError, StatusNotOk, TypeError):
+        except _SDK_EXCEPTION:
             linear_terms = _UNAVAILABLE
         try:
             quadratic_terms: object = tuple(objective.quadratic_terms())
-        except (AttributeError, RuntimeError, StatusNotOk, TypeError):
+        except _SDK_EXCEPTION:
             quadratic_terms = _UNAVAILABLE
         offset: object = self._guarded_attribute(objective, "offset")
         if not isinstance(linear_terms, tuple) or not isinstance(
@@ -366,9 +389,7 @@ class Integration:
             return MissingReason.NO_SOLUTION
         try:
             value: object = result.objective_value()
-        except (AttributeError, AssertionError):
-            return MissingReason.UNSUPPORTED
-        except ValueError:
+        except _SDK_EXCEPTION:
             return MissingReason.FAILED
         if isinstance(value, (int, float)):
             return float(value)
@@ -377,15 +398,14 @@ class Integration:
     def _numeric_result_value(
         self,
         result: SolveResult,
-        result_method_name: str,
     ) -> float | MissingReason:
-        """One numeric value from a MathOpt result."""
-        result_method: object = self._guarded_attribute(result, result_method_name)
+        """The dual bound from a MathOpt result."""
+        result_method: object = self._guarded_attribute(result, "dual_bound")
         if not callable(result_method):
             return MissingReason.UNSUPPORTED
         try:
             value: object = result_method()
-        except (AttributeError, RuntimeError):
+        except _SDK_EXCEPTION:
             return MissingReason.FAILED
         if isinstance(value, (int, float)):
             return float(value)
@@ -398,7 +418,7 @@ class Integration:
             return MissingReason.UNSUPPORTED
         try:
             duration: object = solve_time_method()
-        except (AttributeError, RuntimeError):
+        except _SDK_EXCEPTION:
             return MissingReason.FAILED
         if isinstance(duration, timedelta):
             return duration.total_seconds()
@@ -420,20 +440,12 @@ class Integration:
         if result is None:
             return statistics
         supported_statistics: set[str] = set()
-        zero_statistics_are_known: set[str] = set()
         if solver_type is SolverType.GLOP:
             supported_statistics.add("simplex_iterations")
         elif solver_type is SolverType.GSCIP:
             supported_statistics.update(
                 ("node_count", "simplex_iterations", "barrier_iterations")
             )
-            if self._gscip_statistics_availability_is_known(
-                result,
-                solve_parameters,
-            ):
-                zero_statistics_are_known.update(
-                    ("node_count", "simplex_iterations", "barrier_iterations")
-                )
         elif solver_type is SolverType.HIGHS:
             has_integer_variables: bool | None = self._has_integer_variables(model)
             solves_relaxation: bool | None = self._highs_solves_relaxation(
@@ -447,8 +459,12 @@ class Integration:
                 )
             elif solves_relaxation is False and has_integer_variables is True:
                 supported_statistics.add("node_count")
+        zero_statistics_are_known: set[str] = (
+            supported_statistics
+            if self._statistics_availability_is_known(result, solve_parameters)
+            else set()
+        )
         solve_stats: object = self._guarded_attribute(result, "solve_stats")
-        statistic_name: str
         for statistic_name in statistics:
             if statistic_name not in supported_statistics:
                 continue
@@ -460,12 +476,12 @@ class Integration:
                 statistics[statistic_name] = MissingReason.FAILED
         return statistics
 
-    def _gscip_statistics_availability_is_known(
+    def _statistics_availability_is_known(
         self,
         result: SolveResult,
         solve_parameters: SolveParameters | None,
     ) -> bool:
-        """The GSCIP solve states that establish work-count availability."""
+        """The MathOpt solve states that establish work-count availability."""
         termination: object = self._guarded_attribute(result, "termination")
         reason: object = self._guarded_attribute(termination, "reason")
         limit: object = self._guarded_attribute(termination, "limit")
@@ -492,9 +508,8 @@ class Integration:
             return None
         try:
             variables: tuple[object, ...] = tuple(variables_method())
-        except (AttributeError, RuntimeError, StatusNotOk, TypeError):
+        except _SDK_EXCEPTION:
             return None
-        variable: object
         for variable in variables:
             integer_flag: object = self._guarded_attribute(variable, "integer")
             if not isinstance(integer_flag, bool):
@@ -521,7 +536,7 @@ class Integration:
             return None
         try:
             solves_relaxation: object = boolean_options.get("solve_relaxation", False)
-        except (KeyError, TypeError):
+        except _SDK_EXCEPTION:
             return None
         return solves_relaxation if isinstance(solves_relaxation, bool) else None
 
@@ -545,7 +560,6 @@ class Integration:
                 bool,
             ):
                 native["first_order_iterations"] = float(first_order_iterations)
-        output_name: str
         for output_name in (
             "gscip_specific_output",
             "osqp_specific_output",
@@ -570,12 +584,10 @@ class Integration:
             return
         try:
             fields: object = list_fields_method()
-        except (AttributeError, RuntimeError):
+        except _SDK_EXCEPTION:
             return
         if not isinstance(fields, list):
             return
-        field_descriptor: object
-        field_value: object
         for field_descriptor, field_value in fields:
             field_name: object = self._guarded_attribute(field_descriptor, "name")
             enum_descriptor: object = self._guarded_attribute(
@@ -620,7 +632,10 @@ class Integration:
         if solver_type_name is not None:
             solver_name = solver_names.get(solver_type_name)
         problem: dict[str, int | float | str | bool] = self._problem_size(model)
-        parameters: list[SolverParameter] = self._parameters(solve_parameters)
+        parameters: list[SolverParameter] = self._parameters(
+            solve_parameters,
+            solver_type,
+        )
         api_version: object = self._guarded_attribute(ortools, "__version__")
         return ReportedMetadata(
             solver=solver_name,
@@ -643,15 +658,13 @@ class Integration:
             ("num_indicator_constraints", "get_num_indicator_constraints"),
         )
         constraint_counts: list[int] = []
-        problem_name: str
-        method_name: str
         for problem_name, method_name in count_methods:
             count_method: object = self._guarded_attribute(model, method_name)
             if not callable(count_method):
                 continue
             try:
                 count: object = count_method()
-            except (AttributeError, RuntimeError, StatusNotOk):
+            except _SDK_EXCEPTION:
                 continue
             if isinstance(count, int) and not isinstance(count, bool):
                 problem[problem_name] = count
@@ -664,12 +677,11 @@ class Integration:
             return problem
         try:
             variables: object = tuple(variables_method())
-        except (AttributeError, RuntimeError, StatusNotOk, TypeError):
+        except _SDK_EXCEPTION:
             return problem
         if isinstance(variables, tuple):
             integer_count: int = 0
             all_integer_flags_available: bool = True
-            variable: object
             for variable in variables:
                 integer_flag: object = self._guarded_attribute(variable, "integer")
                 if isinstance(integer_flag, bool):
@@ -681,16 +693,35 @@ class Integration:
         return problem
 
     def _parameters(
-        self, solve_parameters: SolveParameters | None
+        self,
+        solve_parameters: SolveParameters | None,
+        solver_type: SolverType | None,
     ) -> list[SolverParameter]:
         """The solve parameters that differ from MathOpt defaults."""
         parameters: list[SolverParameter] = []
         if solve_parameters is None:
             return parameters
+        backend_parameter_groups: dict[str, SolverType] = {
+            "gscip": SolverType.GSCIP,
+            "gurobi": SolverType.GUROBI,
+            "glop": SolverType.GLOP,
+            "cp_sat": SolverType.CP_SAT,
+            "pdlp": SolverType.PDLP,
+            "osqp": SolverType.OSQP,
+            "glpk": SolverType.GLPK,
+            "highs": SolverType.HIGHS,
+        }
         default_parameters: SolveParameters = SolveParameters()
-        parameter_field: object
         for parameter_field in dataclasses.fields(SolveParameters):
             parameter_name: str = parameter_field.name
+            backend_solver_type: SolverType | None = backend_parameter_groups.get(
+                parameter_name
+            )
+            if (
+                backend_solver_type is not None
+                and backend_solver_type is not solver_type
+            ):
+                continue
             parameter_value: object = self._guarded_attribute(
                 solve_parameters, parameter_name
             )
@@ -699,10 +730,19 @@ class Integration:
             )
             if parameter_value is _UNAVAILABLE or default_value is _UNAVAILABLE:
                 continue
-            if parameter_value == default_value or parameter_value is None:
+            is_default: bool = True
+            try:
+                is_default = parameter_value == default_value
+            except _SDK_EXCEPTION:
+                is_default = True
+            if is_default or parameter_value is None:
                 continue
             self._append_parameters(
-                parameter_name, parameter_value, default_value, parameters
+                parameter_name,
+                parameter_value,
+                default_value,
+                parameters,
+                parameter_name == "gurobi",
             )
         return parameters
 
@@ -712,35 +752,57 @@ class Integration:
         parameter_value: object,
         default_value: object,
         parameters: list[SolverParameter],
+        suppress_strings: bool,
     ) -> None:
         """The differing nested MathOpt parameter values."""
         if parameter_value is None or parameter_value is _UNAVAILABLE:
             return
-        if parameter_value == default_value:
+        try:
+            is_default: bool = parameter_value == default_value
+        except _SDK_EXCEPTION:
+            return
+        if is_default:
+            return
+        if suppress_strings and isinstance(parameter_value, str):
             return
         if isinstance(parameter_value, Mapping):
             default_mapping: Mapping[object, object] = (
                 default_value if isinstance(default_value, Mapping) else {}
             )
-            nested_name: object
-            nested_value: object
-            for nested_name, nested_value in parameter_value.items():
+            mapping_items: tuple[tuple[object, object], ...]
+            try:
+                mapping_items = tuple(parameter_value.items())
+            except _SDK_EXCEPTION:
+                return
+            for nested_name, nested_value in mapping_items:
                 if not isinstance(nested_name, str):
                     continue
-                nested_default: object = default_mapping.get(nested_name, _UNAVAILABLE)
+                try:
+                    nested_default: object = default_mapping.get(
+                        nested_name,
+                        _UNAVAILABLE,
+                    )
+                except _SDK_EXCEPTION:
+                    nested_default = _UNAVAILABLE
                 self._append_parameters(
                     f"{parameter_name}.{nested_name}",
                     nested_value,
                     nested_default,
                     parameters,
+                    suppress_strings,
                 )
             return
         if dataclasses.is_dataclass(parameter_value) and not isinstance(
             parameter_value, type
         ):
             default_object: object = default_value
-            parameter_field: object
-            for parameter_field in dataclasses.fields(parameter_value):
+            try:
+                nested_fields: tuple[object, ...] = tuple(
+                    dataclasses.fields(parameter_value)
+                )
+            except _SDK_EXCEPTION:
+                return
+            for parameter_field in nested_fields:
                 nested_name: str = parameter_field.name
                 nested_value: object = self._guarded_attribute(
                     parameter_value, nested_name
@@ -753,6 +815,7 @@ class Integration:
                     nested_value,
                     nested_default,
                     parameters,
+                    suppress_strings,
                 )
             return
         if self._is_message(parameter_value):
@@ -763,12 +826,10 @@ class Integration:
                 return
             try:
                 fields: object = list_fields_method()
-            except (AttributeError, RuntimeError, StatusNotOk):
+            except _SDK_EXCEPTION:
                 return
             if not isinstance(fields, list):
                 return
-            field_descriptor: object
-            field_value: object
             for field_descriptor, field_value in fields:
                 field_name: object = self._guarded_attribute(field_descriptor, "name")
                 enum_descriptor: object = self._guarded_attribute(
@@ -783,9 +844,12 @@ class Integration:
                     )
                     if not isinstance(enum_values, Mapping):
                         continue
+                    enum_value: object = _UNAVAILABLE
                     try:
-                        enum_value: object = enum_values[field_value]
-                    except KeyError:
+                        enum_value = enum_values[field_value]
+                    except _SDK_EXCEPTION:
+                        pass
+                    if enum_value is _UNAVAILABLE:
                         continue
                     enum_name: object = self._guarded_attribute(enum_value, "name")
                     if isinstance(enum_name, str):
@@ -802,6 +866,7 @@ class Integration:
                         field_value,
                         _UNAVAILABLE,
                         parameters,
+                        suppress_strings,
                     )
             return
         scalar: ParameterValue | None = self._parameter_value(parameter_value)
@@ -810,13 +875,15 @@ class Integration:
                 SolverParameter(parameter_name, scalar, ParameterOrigin.EXPLICIT)
             )
             return
-        serialized_value: str = str(parameter_value)
-        if isinstance(serialized_value, str):
-            parameters.append(
-                SolverParameter(
-                    parameter_name, serialized_value, ParameterOrigin.EXPLICIT
-                )
-            )
+        try:
+            serialized_value: str = str(parameter_value)
+        except _SDK_EXCEPTION:
+            return
+        if suppress_strings:
+            return
+        parameters.append(
+            SolverParameter(parameter_name, serialized_value, ParameterOrigin.EXPLICIT)
+        )
 
     def _parameter_value(self, parameter_value: object) -> ParameterValue | None:
         """The scalar form of a MathOpt parameter."""
@@ -849,5 +916,5 @@ class Integration:
             return _UNAVAILABLE
         try:
             return getattr(attribute_owner, attribute_name)
-        except (AttributeError, RuntimeError, StatusNotOk):
+        except _SDK_EXCEPTION:
             return _UNAVAILABLE
