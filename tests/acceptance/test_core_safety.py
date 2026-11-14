@@ -96,7 +96,6 @@ def test_unavailable_solver_values_are_missing_with_reasons_and_other_values_rem
         "barrier_iterations",
     )
 
-    metric_name: str
     for metric_name in unavailable_metrics:
         assert metric_name not in solve_run.data.metrics
         assert (
@@ -185,7 +184,6 @@ def test_solve_exception_propagates_and_marks_run_failed(tracking: Tracking) -> 
     autolog(solvers=["fake"])
     solve_error: RuntimeError = RuntimeError("solver failed")
     solver: FakeSolver = FakeSolver(raises=solve_error)
-    raised_error: pytest.ExceptionInfo[RuntimeError]
 
     with pytest.raises(RuntimeError) as raised_error:
         solver.solve()
@@ -258,7 +256,6 @@ def test_failed_solve_payload_contains_only_documented_keys_and_no_error_message
         "simplex_iterations",
         "barrier_iterations",
     }
-    tag_key: str
     for tag_key in solve_run.data.tags:
         assert (
             tag_key in documented_tag_keys
@@ -267,7 +264,6 @@ def test_failed_solve_payload_contains_only_documented_keys_and_no_error_message
             )
         )
 
-    parameter_key: str
     for parameter_key in solve_run.data.params:
         assert parameter_key.startswith(
             (
@@ -278,22 +274,18 @@ def test_failed_solve_payload_contains_only_documented_keys_and_no_error_message
             )
         )
 
-    metric_key: str
     for metric_key in solve_run.data.metrics:
         assert (
             metric_key in documented_metric_keys
             or metric_key.startswith(("fake.", "user."))
         )
 
-    tag_value: str
     for tag_value in solve_run.data.tags.values():
         assert "SECRET" not in tag_value
 
-    parameter_value: str
     for parameter_value in solve_run.data.params.values():
         assert "SECRET" not in parameter_value
 
-    metric_value: float
     for metric_value in solve_run.data.metrics.values():
         assert "SECRET" not in str(metric_value)
 

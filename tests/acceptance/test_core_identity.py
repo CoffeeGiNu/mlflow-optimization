@@ -27,11 +27,8 @@ def test_thirty_solves_keep_their_instance_and_parameters(tracking: Tracking) ->
         (4, 0.4),
     )
     expected_parameters: dict[tuple[str, str], dict[str, str]] = {}
-    instance_index: int
     for instance_index in range(10):
         instance_name: str = f"instance-{instance_index:02}"
-        setting_threads: int
-        setting_relative_gap: float
         for setting_threads, setting_relative_gap in parameter_settings:
             solver_parameters: dict[str, int | float | str | bool] = {
                 "threads": setting_threads,
@@ -50,7 +47,6 @@ def test_thirty_solves_keep_their_instance_and_parameters(tracking: Tracking) ->
     run_ids: list[str] = []
     solve_indexes: list[int] = []
     observed_runs: dict[tuple[str, str], Run] = {}
-    run: Run
     for run in solve_runs:
         run_ids.append(run.info.run_id)
         solve_indexes.append(int(run.data.tags["optimization.solve_index"]))
@@ -65,7 +61,6 @@ def test_thirty_solves_keep_their_instance_and_parameters(tracking: Tracking) ->
     first_solve_index: int = solve_indexes[0]
     assert solve_indexes == list(range(first_solve_index, first_solve_index + 30))
     assert set(observed_runs) == set(expected_parameters)
-    identity: tuple[str, str]
     for identity, run in observed_runs.items():
         assert run.data.params == expected_parameters[identity]
 
@@ -152,7 +147,6 @@ def test_parallel_thread_solves_are_recorded_separately(tracking: Tracking) -> N
     futures: list[Future[str]] = []
     expected_parameters: dict[str, dict[str, str]] = {}
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        instance_index: int
         for instance_index in range(worker_count):
             instance_name: str = f"thread-instance-{instance_index}"
             expected_parameters[instance_name] = {
@@ -162,7 +156,6 @@ def test_parallel_thread_solves_are_recorded_separately(tracking: Tracking) -> N
             futures.append(future)
 
         statuses: list[str] = []
-        future: Future[str]
         for future in futures:
             statuses.append(future.result())
 
@@ -172,7 +165,6 @@ def test_parallel_thread_solves_are_recorded_separately(tracking: Tracking) -> N
     run_ids: list[str] = []
     solve_indexes: list[int] = []
     observed_parameters: dict[str, dict[str, str]] = {}
-    run: Run
     for run in solve_runs:
         run_ids.append(run.info.run_id)
         solve_indexes.append(int(run.data.tags["optimization.solve_index"]))
@@ -234,6 +226,5 @@ def test_inherited_async_task_observes_solves_after_outer_solve_ends(
     assert len(solve_runs) == 2
     assert solve_runs[0].data.params == {}
     assert solve_runs[1].data.params == {"solver_param.threads": "2"}
-    run: Run
     for run in solve_runs:
         assert run.data.tags["optimization.api"] == "fake"

@@ -39,7 +39,6 @@ class AutologManager:
 
     def enable(self, integrations: Sequence[SolverIntegration]) -> None:
         """Observe exactly the given integrations."""
-        integration: SolverIntegration
         for integration in self._integrations[:]:
             if not any(integration is candidate for candidate in integrations):
                 integration.uninstall()
@@ -53,7 +52,6 @@ class AutologManager:
     def disable(self) -> None:
         """Stop observing and uninstall every integration."""
         self._enabled = False
-        integration: SolverIntegration
         for integration in self._integrations[:]:
             integration.uninstall()
             self._integrations.remove(integration)
@@ -117,7 +115,6 @@ class AutologManager:
                     end - start, None, error,
                 )
                 guard("recording", lambda: finish(solve))
-                failure: str
                 for failure in failures:
                     warn(failure)
                 raise

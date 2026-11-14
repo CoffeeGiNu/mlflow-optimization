@@ -67,7 +67,6 @@ class SolveRun:
         description: str | None = None,
     ) -> None:
         """Add a user metric to this solve."""
-        error: RunStoreError
         try:
             entry: UserMetric | None = user_metric(
                 name, value, unit=unit, description=description
@@ -81,7 +80,6 @@ class SolveRun:
 
     def set_tags(self, tags: Mapping[str, str]) -> None:
         """Add user tags to this solve."""
-        error: RunStoreError
         try:
             accepted: dict[str, str] = user_tags(tags)
             if accepted:
@@ -91,7 +89,6 @@ class SolveRun:
 
     def log_artifact(self, local_path: str, artifact_path: str | None = None) -> None:
         """Attach a local file to this solve."""
-        error: ArtifactStoreError
         try:
             refusal: str | None = artifact_refusal(
                 local_path, enabled=self._options.log_artifacts
@@ -122,7 +119,6 @@ class RecordSolve:
     def begin(self) -> object:
         """The parent run and annotations in effect at solve start."""
         parent: RunReference | None
-        error: RunStoreError
         try:
             parent = self._runs.active_run()
         except RunStoreError as error:
@@ -179,7 +175,6 @@ class RecordSolve:
             params=metadata.params,
         )
         run: RunReference
-        error: RunStoreError
         try:
             run = self._runs.save(record, context.parent)
         except RunStoreError as error:

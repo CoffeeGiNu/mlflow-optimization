@@ -84,7 +84,6 @@ def _imported_modules(
 ) -> set[str]:
     imported_modules: set[str] = set()
     if isinstance(import_node, ast.Import):
-        alias: ast.alias
         for alias in import_node.names:
             imported_modules.add(alias.name)
         return imported_modules
@@ -93,14 +92,12 @@ def _imported_modules(
     if import_node.level > 0:
         base_module = _relative_import_base(package_name, import_node)
     if base_module in IMPORT_CONTAINERS:
-        alias: ast.alias
         for alias in import_node.names:
             imported_modules.add(f"{base_module}.{alias.name}")
         return imported_modules
     if base_module == "ortools" and all(
         alias.name in ORTOOLS_SUBMODULES for alias in import_node.names
     ):
-        alias: ast.alias
         for alias in import_node.names:
             imported_modules.add(f"{base_module}.{alias.name}")
         return imported_modules
@@ -147,7 +144,6 @@ def _find_feature_cycle(feature_dependencies: dict[str, set[str]]) -> list[str] 
         if feature_name in visited_features:
             return None
         active_features.append(feature_name)
-        dependency: str
         for dependency in sorted(feature_dependencies[feature_name]):
             dependency_cycle: list[str] | None = visit_feature(dependency)
             if dependency_cycle is not None:
@@ -156,7 +152,6 @@ def _find_feature_cycle(feature_dependencies: dict[str, set[str]]) -> list[str] 
         visited_features.add(feature_name)
         return None
 
-    feature_name: str
     for feature_name in sorted(feature_dependencies):
         cycle: list[str] | None = visit_feature(feature_name)
         if cycle is not None:
@@ -236,7 +231,6 @@ def _check_integration_import(
         ):
             return None
         return f"{relative_path}: integration '{source_integration}' imports feature module '{target_module}'"
-    allowed_sdk_prefix: str
     for allowed_sdk_prefix in INTEGRATION_SDK_PREFIXES[source_integration]:
         if _is_package_module(target_module, allowed_sdk_prefix):
             return None
@@ -246,10 +240,8 @@ def _check_integration_import(
 def _architecture_violations() -> list[str]:
     violations: list[str] = []
     feature_dependencies: dict[str, set[str]] = {}
-    feature_name: str
     for feature_name in FEATURE_IMPORT_RULES:
         feature_dependencies[feature_name] = set()
-    source_file: Path
     for source_file in sorted(SOURCE_ROOT.rglob("*.py")):
         module_name: str = _module_name(source_file)
         package_name: str = _package_name(module_name, source_file)
@@ -267,11 +259,9 @@ def _architecture_violations() -> list[str]:
         syntax_tree: ast.Module = ast.parse(
             source_file.read_text(encoding="utf-8"), filename=str(source_file)
         )
-        import_node: ast.AST
         for import_node in ast.walk(syntax_tree):
             if not isinstance(import_node, (ast.Import, ast.ImportFrom)):
                 continue
-            target_module: str
             for target_module in sorted(
                 _imported_modules(package_name, import_node)
             ):

@@ -39,10 +39,6 @@ def normalize_metrics(
     values: dict[str, float] = {}
     missing: dict[str, MissingReason] = {}
     tags: dict[str, str] = {}
-    metric_name: str
-    reported_value: float | MissingReason
-    native_name: str
-    native_value: float
 
     _record_reported_metric(values, missing, "wall_time_seconds", wall_time_seconds)
 

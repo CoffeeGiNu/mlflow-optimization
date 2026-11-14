@@ -180,7 +180,6 @@ def test_absent_common_metrics_get_reason_tags_without_zero_filling(
     )
 
     assert normalized.values == {"wall_time_seconds": 2.5}
-    metric_name: str
     for metric_name in absent_metrics:
         assert (
             normalized.tags[f"optimization.missing.{metric_name}"]
@@ -212,7 +211,6 @@ def test_objective_less_models_make_objective_metrics_undefined() -> None:
 
     assert normalized.values == {"wall_time_seconds": 1.0}
     assert normalized.tags["optimization.has_objective"] == "false"
-    metric_name: str
     for metric_name in objective_metrics:
         assert (
             normalized.tags[f"optimization.missing.{metric_name}"]
@@ -239,7 +237,6 @@ def test_no_solution_discards_a_bogus_objective_but_keeps_a_finite_bound() -> No
         "dual_bound": 900.0,
         "wall_time_seconds": 1.0,
     }
-    metric_name: str
     for metric_name in ("objective_value", "absolute_gap", "relative_gap"):
         assert (
             normalized.tags[f"optimization.missing.{metric_name}"]
@@ -279,7 +276,6 @@ def test_non_finite_common_and_native_metrics_are_not_recorded() -> None:
     )
 
     assert normalized.values == {}
-    metric_name: str
     for metric_name in common_metrics:
         assert (
             normalized.tags[f"optimization.missing.{metric_name}"]

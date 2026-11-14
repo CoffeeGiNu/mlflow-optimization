@@ -61,8 +61,6 @@ def annotation_tags(annotation: Annotation) -> dict[str, str]:
 def user_tags(tags: Mapping[str, str]) -> dict[str, str]:
     """The subset of user tags that may be recorded."""
     accepted_tags: dict[str, str] = {}
-    key: str
-    value: str
     for key, value in tags.items():
         if key.startswith(("optimization.", "mlflow.")):
             warn(f"Ignoring user tag with reserved key {key!r}.")

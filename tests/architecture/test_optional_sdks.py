@@ -139,7 +139,6 @@ def test_optional_sdks_can_be_missing(
         assert solve_runs == []
     else:
         solved_api: str = ""
-        output_line: str
         for output_line in process.stdout.splitlines():
             if output_line.startswith("SOLVED_API="):
                 solved_api = output_line.removeprefix("SOLVED_API=")

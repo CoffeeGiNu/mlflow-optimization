@@ -4,7 +4,6 @@ from .types import (
     CollectedMetadata,
     ParameterOrigin,
     ReportedMetadata,
-    SolverParameter,
 )
 
 
@@ -37,8 +36,6 @@ def collect_metadata(
         reported.wall_time_includes_problem_build
     )
 
-    problem_name: str
-    problem_value: int | float | str | bool
     for problem_name, problem_value in reported.problem.items():
         collected_parameters[f"problem.{problem_name}"] = _format_value(problem_value)
 
@@ -48,7 +45,6 @@ def collect_metadata(
             ParameterOrigin.DEFAULT: "solver_param_default.",
             ParameterOrigin.EFFECTIVE: "solver_param_effective.",
         }
-        parameter: SolverParameter
         for parameter in reported.parameters:
             parameter_key: str = (
                 parameter_prefixes[parameter.origin] + parameter.name
