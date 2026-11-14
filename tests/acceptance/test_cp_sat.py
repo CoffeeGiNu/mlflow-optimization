@@ -1,10 +1,13 @@
 import math
+from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from mlflow.entities import Run
 from ortools.sat.python import cp_model
 
 from mlflow_optimization import autolog
+from mlflow_optimization.integrations.cp_sat.adapter import CpSatAdapter
 
 
 class SolutionCounter(cp_model.CpSolverSolutionCallback):
@@ -16,6 +19,24 @@ class SolutionCounter(cp_model.CpSolverSolutionCallback):
 
     def on_solution_callback(self) -> None:
         self.calls += 1
+
+
+class _RaisesOnLength:
+    def __len__(self) -> int:
+        raise RuntimeError("length unavailable")
+
+
+@pytest.mark.parametrize("variables", [None, object(), _RaisesOnLength()])
+def test_cp_sat_unavailable_variables_preserve_constraint_count(
+    variables: Any | None,
+) -> None:
+    adapter: CpSatAdapter = CpSatAdapter()
+    model: SimpleNamespace = SimpleNamespace(
+        proto=SimpleNamespace(variables=variables, constraints=[object()])
+    )
+
+    assert adapter._read_raw_status(None) == "unknown"
+    assert adapter._read_problem_size(model) == {"num_constraints": 1}
 
 
 def test_cp_sat_records_an_optimal_optimization(tracking: Any) -> None:

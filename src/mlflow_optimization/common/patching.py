@@ -7,7 +7,9 @@ from types import ModuleType
 from typing import Any
 
 
-def receiver_of(original: Callable[..., Any], args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> Any:
+def receiver_of(
+    original: Callable[..., Any], args: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> Any:
     """The receiver of a method call."""
     receiver_name: str | None = next(iter(signature(original).parameters), None)
     if receiver_name is None:

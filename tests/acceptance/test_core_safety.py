@@ -4,11 +4,11 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
+from conftest import Tracking
 from mlflow.entities import FileInfo, Run
 from mlflow.exceptions import MlflowException
 from mlflow.tracking import MlflowClient
 
-from conftest import Tracking
 from mlflow_optimization import (
     MlflowOptimizationWarning,
     SolveRun,
@@ -121,7 +121,7 @@ def test_disabling_autolog_preserves_recording_options(
     def solve_on_thread() -> None:
         try:
             solver.solve()
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001
             solve_errors.append(error)
 
     solve_thread: Thread = Thread(target=solve_on_thread, daemon=True)
@@ -208,8 +208,7 @@ def test_unavailable_solver_values_are_missing_with_reasons_and_other_values_rem
     for metric_name in unavailable_metrics:
         assert metric_name not in solve_run.data.metrics
         assert (
-            solve_run.data.tags[f"optimization.missing.{metric_name}"]
-            == "unsupported"
+            solve_run.data.tags[f"optimization.missing.{metric_name}"] == "unsupported"
         )
 
     assert solve_run.data.metrics["node_count"] == 4.0
@@ -329,9 +328,7 @@ def test_failed_solve_payload_contains_only_documented_keys_and_no_error_message
     from fakes import FakeSolver
 
     autolog(libraries=["fake"])
-    solver: FakeSolver = FakeSolver(
-        raises=FileNotFoundError("/input/SECRET/data.csv")
-    )
+    solver: FakeSolver = FakeSolver(raises=FileNotFoundError("/input/SECRET/data.csv"))
 
     with pytest.raises(FileNotFoundError):
         solver.solve()
@@ -366,11 +363,8 @@ def test_failed_solve_payload_contains_only_documented_keys_and_no_error_message
         "barrier_iterations",
     }
     for tag_key in solve_run.data.tags:
-        assert (
-            tag_key in documented_tag_keys
-            or tag_key.startswith(
-                ("optimization.missing.", "user.", "mlflow.")
-            )
+        assert tag_key in documented_tag_keys or tag_key.startswith(
+            ("optimization.missing.", "user.", "mlflow.")
         )
 
     for parameter_key in solve_run.data.params:
@@ -384,9 +378,8 @@ def test_failed_solve_payload_contains_only_documented_keys_and_no_error_message
         )
 
     for metric_key in solve_run.data.metrics:
-        assert (
-            metric_key in documented_metric_keys
-            or metric_key.startswith(("fake.", "user."))
+        assert metric_key in documented_metric_keys or metric_key.startswith(
+            ("fake.", "user.")
         )
 
     for tag_value in solve_run.data.tags.values():
@@ -409,6 +402,7 @@ def test_wall_time_excludes_a_slow_run_store_save(
     from time import perf_counter, sleep
 
     from fakes import FakeSolver
+
     from mlflow_optimization.features.runs.types import RunReference, SolveRecord
     from mlflow_optimization.integrations.mlflow.runs import MlflowRunStore
 
@@ -455,9 +449,11 @@ def test_unstoreable_context_tag_warns_without_losing_solve(
     assert len(long_tag_key) == 400
     solver: FakeSolver = FakeSolver()
 
-    with pytest.warns(MlflowOptimizationWarning, match=long_tag_key):
-        with context(tags={long_tag_key: "value"}):
-            result: str = solver.solve()
+    with (
+        pytest.warns(MlflowOptimizationWarning, match=long_tag_key),
+        context(tags={long_tag_key: "value"}),
+    ):
+        result: str = solver.solve()
 
     solve_run: SolveRun | None = last_solve()
     assert result == "optimal"

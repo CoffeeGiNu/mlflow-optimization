@@ -6,14 +6,24 @@ from math import inf
 from typing import Any
 
 import gurobipy
-
 from mlflow_optimization.common.patching import Patch, receiver_of
+from mlflow_optimization.features.autolog.ports import (
+    ObservationError,
+    SolveObserver,
+    SolverIntegration,
+)
 from mlflow_optimization.features.autolog.types import SolveObservation
-from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver, SolverIntegration
-from mlflow_optimization.features.metadata.types import ParameterOrigin, ReportedMetadata, SolverParameter
-from mlflow_optimization.features.metrics.types import MissingReason, ObjectiveSense, ReportedMetrics
+from mlflow_optimization.features.metadata.types import (
+    ParameterOrigin,
+    ReportedMetadata,
+    SolverParameter,
+)
+from mlflow_optimization.features.metrics.types import (
+    MissingReason,
+    ObjectiveSense,
+    ReportedMetrics,
+)
 from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
-
 
 _STATUS_TERMINATIONS: dict[int, tuple[str, Termination]] = {
     gurobipy.GRB.LOADED: ("LOADED", Termination.UNKNOWN),
@@ -56,14 +66,20 @@ class GurobiAdapter(SolverIntegration):
                 def call() -> Any:
                     return original(*args, **kwargs)
 
-                def extract(result: Any | None, error: BaseException | None) -> SolveObservation:
+                def extract(
+                    result: Any | None, error: BaseException | None
+                ) -> SolveObservation:
                     if not isinstance(receiver, gurobipy.Model):
-                        raise ObservationError("Could not find the Gurobi model for this solve.") from error
+                        raise ObservationError(
+                            "Could not find the Gurobi model for this solve."
+                        ) from error
                     model: gurobipy.Model = receiver
                     try:
                         return _extract(model, error)
                     except Exception as observation_error:
-                        raise ObservationError("Could not build a Gurobi solve observation.") from observation_error
+                        raise ObservationError(
+                            "Could not build a Gurobi solve observation."
+                        ) from observation_error
 
                 return solve_observer.observe(self.api, call, extract)
 
@@ -78,13 +94,24 @@ class GurobiAdapter(SolverIntegration):
 def _extract(model: gurobipy.Model, error: BaseException | None) -> SolveObservation:
     metadata: ReportedMetadata = _read_metadata(model)
     if error is not None:
-        termination: Termination = (
-            Termination.INTERRUPTED if isinstance(error, KeyboardInterrupt) else Termination.ERROR
+        error_termination: Termination = (
+            Termination.INTERRUPTED
+            if isinstance(error, KeyboardInterrupt)
+            else Termination.ERROR
         )
-        raw_status: str = "INTERRUPTED" if isinstance(error, KeyboardInterrupt) else "ERROR"
-        outcome: ReportedOutcome = ReportedOutcome(raw_status, termination, None)
-        metrics: ReportedMetrics = ReportedMetrics()
-        return SolveObservation(api="gurobipy", outcome=outcome, metrics=metrics, metadata=metadata)
+        error_status: str = (
+            "INTERRUPTED" if isinstance(error, KeyboardInterrupt) else "ERROR"
+        )
+        error_outcome: ReportedOutcome = ReportedOutcome(
+            error_status, error_termination, None
+        )
+        error_metrics: ReportedMetrics = ReportedMetrics()
+        return SolveObservation(
+            api="gurobipy",
+            outcome=error_outcome,
+            metrics=error_metrics,
+            metadata=metadata,
+        )
     raw_status: str
     termination: Termination
     raw_status, termination = _read_status(model)
@@ -96,7 +123,9 @@ def _extract(model: gurobipy.Model, error: BaseException | None) -> SolveObserva
         has_solution = solution_count > 0
     has_objective: bool | None = _read_has_objective(model)
     sense: ObjectiveSense | None = _read_sense(model)
-    objective_value: float | MissingReason = _read_objective_value(model, has_objective, has_solution)
+    objective_value: float | MissingReason = _read_objective_value(
+        model, has_objective, has_solution
+    )
     dual_bound: float | MissingReason = _read_dual_bound(model, has_objective)
     solver_time_seconds: float | MissingReason = _read_solver_number(model, "Runtime")
     statistics: dict[str, float | MissingReason] = {
@@ -121,7 +150,9 @@ def _extract(model: gurobipy.Model, error: BaseException | None) -> SolveObserva
         statistics=statistics,
         native=native,
     )
-    return SolveObservation(api="gurobipy", outcome=outcome, metrics=metrics, metadata=metadata)
+    return SolveObservation(
+        api="gurobipy", outcome=outcome, metrics=metrics, metadata=metadata
+    )
 
 
 def _read_metadata(model: gurobipy.Model) -> ReportedMetadata:
@@ -154,7 +185,7 @@ def _read_metadata(model: gurobipy.Model) -> ReportedMetadata:
 def _read_attribute(model: gurobipy.Model, attribute_name: str) -> tuple[bool, Any]:
     try:
         value: Any = getattr(model, attribute_name)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False, None
     return True, value
 
@@ -167,15 +198,19 @@ def _read_status(model: gurobipy.Model) -> tuple[str, Termination]:
         return "UNKNOWN", Termination.UNKNOWN
     try:
         status_code: int = int(raw_value)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return "UNKNOWN", Termination.UNKNOWN
     status_name: str
     termination: Termination
-    status_name, termination = _STATUS_TERMINATIONS.get(status_code, ("UNKNOWN", Termination.UNKNOWN))
+    status_name, termination = _STATUS_TERMINATIONS.get(
+        status_code, ("UNKNOWN", Termination.UNKNOWN)
+    )
     return f"{status_name} ({status_code})", termination
 
 
-def _read_solver_number(model: gurobipy.Model, attribute_name: str) -> float | MissingReason:
+def _read_solver_number(
+    model: gurobipy.Model, attribute_name: str
+) -> float | MissingReason:
     readable: bool
     raw_value: Any
     readable, raw_value = _read_attribute(model, attribute_name)
@@ -184,7 +219,7 @@ def _read_solver_number(model: gurobipy.Model, attribute_name: str) -> float | M
     try:
         value: float = float(raw_value)
         solver_infinity: float = float(gurobipy.GRB.INFINITY)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return MissingReason.FAILED
     if value == solver_infinity:
         return inf
@@ -201,7 +236,7 @@ def _read_problem_size(model: gurobipy.Model, attribute_name: str) -> int | None
         return None
     try:
         return int(raw_value)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -224,10 +259,12 @@ def _read_has_objective(model: gurobipy.Model) -> bool | None:
                 objective = model.getObjective()
             else:
                 objective = model.getObjective(objective_index)
-        except Exception:
+        except Exception:  # noqa: BLE001
             objective_unavailable = True
             continue
-        objective_has_content: bool | None = _objective_expression_has_content(objective)
+        objective_has_content: bool | None = _objective_expression_has_content(
+            objective
+        )
         if objective_has_content is True:
             return True
         if objective_has_content is None:
@@ -245,13 +282,13 @@ def _read_has_objective(model: gurobipy.Model) -> bool | None:
 def _has_piecewise_linear_objective(model: gurobipy.Model) -> bool | None:
     try:
         variables: list[gurobipy.Var] = model.getVars()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     objective_unavailable: bool = False
     for variable in variables:
         try:
             points: Any = model.getPWLObj(variable)
-        except Exception:
+        except Exception:  # noqa: BLE001
             objective_unavailable = True
             continue
         if points:
@@ -267,11 +304,11 @@ def _objective_expression_has_content(objective: Any) -> bool | None:
     if isinstance(objective, gurobipy.QuadExpr):
         try:
             quadratic_term_count = int(objective.size())
-        except Exception:
+        except Exception:  # noqa: BLE001
             quadratic_term_count = None
         try:
             linear_expression = objective.getLinExpr()
-        except Exception:
+        except Exception:  # noqa: BLE001
             linear_expression = None
     elif isinstance(objective, gurobipy.LinExpr):
         quadratic_term_count = 0
@@ -287,11 +324,11 @@ def _objective_expression_has_content(objective: Any) -> bool | None:
     else:
         try:
             linear_term_count = int(linear_expression.size())
-        except Exception:
+        except Exception:  # noqa: BLE001
             linear_term_count = None
         try:
             constant_value = float(linear_expression.getConstant())
-        except Exception:
+        except Exception:  # noqa: BLE001
             constant_value = None
     if quadratic_term_count is not None and quadratic_term_count > 0:
         return True
@@ -299,7 +336,11 @@ def _objective_expression_has_content(objective: Any) -> bool | None:
         return True
     if constant_value is not None and constant_value != 0.0:
         return True
-    if quadratic_term_count is None or linear_term_count is None or constant_value is None:
+    if (
+        quadratic_term_count is None
+        or linear_term_count is None
+        or constant_value is None
+    ):
         return None
     return False
 
@@ -325,7 +366,9 @@ def _read_objective_value(
     return _read_solver_number(model, "ObjVal")
 
 
-def _read_dual_bound(model: gurobipy.Model, has_objective: bool | None) -> float | MissingReason:
+def _read_dual_bound(
+    model: gurobipy.Model, has_objective: bool | None
+) -> float | MissingReason:
     if has_objective is False:
         return MissingReason.UNDEFINED
     return _read_solver_number(model, "ObjBound")
@@ -340,7 +383,7 @@ def _read_parameters(model: gurobipy.Model) -> tuple[SolverParameter, ...]:
     parameter_names: list[str] = []
     try:
         available_parameter_names: list[str] = dir(parameter_set)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return ()
     for parameter_name in available_parameter_names:
         if parameter_name and parameter_name[0].isupper():
@@ -349,26 +392,34 @@ def _read_parameters(model: gurobipy.Model) -> tuple[SolverParameter, ...]:
     for parameter_name in parameter_names:
         try:
             parameter_info: Any = model.getParamInfo(parameter_name)
-        except Exception:
+        except Exception:  # noqa: BLE001,S112
             continue
         try:
             parameter_type: Any = parameter_info[1]
-        except Exception:
+        except Exception:  # noqa: BLE001,S112
             continue
         # NOTE: LicenseID identifies a WLS license.
         if parameter_type is str or parameter_name == "LicenseID":
             continue
         try:
             current_parameter_value: Any = parameter_info[2]
-        except Exception:
+        except Exception:  # noqa: BLE001,S112
             continue
         try:
             default_parameter_value: Any = parameter_info[5]
-        except Exception:
+        except Exception:  # noqa: BLE001,S112
             continue
-        current_value: int | float | str | bool | None = _plain_parameter_value(current_parameter_value)
-        default_value: int | float | str | bool | None = _plain_parameter_value(default_parameter_value)
-        if current_value is None or default_value is None or current_value == default_value:
+        current_value: int | float | str | bool | None = _plain_parameter_value(
+            current_parameter_value
+        )
+        default_value: int | float | str | bool | None = _plain_parameter_value(
+            default_parameter_value
+        )
+        if (
+            current_value is None
+            or default_value is None
+            or current_value == default_value
+        ):
             continue
         parameters.append(
             SolverParameter(
@@ -389,7 +440,7 @@ def _plain_parameter_value(value: Any) -> int | float | str | bool | None:
 def _read_api_version() -> str | None:
     try:
         version_value: Any = getattr(gurobipy, "__version__", None)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if isinstance(version_value, str):
         return version_value
@@ -399,19 +450,19 @@ def _read_api_version() -> str | None:
 def _read_solver_version() -> str | None:
     try:
         solver_module: Any = getattr(gurobipy, "gurobi", None)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if solver_module is None:
         return None
     try:
         version_function: Any = getattr(solver_module, "version", None)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if not callable(version_function):
         return None
     try:
         version: Any = version_function()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if not isinstance(version, tuple):
         return None

@@ -7,7 +7,7 @@ from .types import (
 )
 
 
-def _format_value(value: int | float | str | bool) -> str:
+def _format_value(value: float | str | bool) -> str:
     """A string representation of a recorded value."""
     if isinstance(value, bool):
         return str(value).lower()
@@ -46,9 +46,7 @@ def collect_metadata(
             ParameterOrigin.EFFECTIVE: "solver_param_effective.",
         }
         for parameter in reported.parameters:
-            parameter_key: str = (
-                parameter_prefixes[parameter.origin] + parameter.name
-            )
+            parameter_key: str = parameter_prefixes[parameter.origin] + parameter.name
             collected_parameters[parameter_key] = _format_value(parameter.value)
 
     return CollectedMetadata(tags=tags, params=collected_parameters)

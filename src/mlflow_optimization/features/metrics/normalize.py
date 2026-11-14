@@ -62,10 +62,14 @@ def normalize_metrics(
             missing["objective_value"] = MissingReason.NO_SOLUTION
             _record_reported_metric(values, missing, "dual_bound", reported.dual_bound)
         else:
-            _record_reported_metric(values, missing, "objective_value", reported.objective_value)
+            _record_reported_metric(
+                values, missing, "objective_value", reported.objective_value
+            )
             _record_reported_metric(values, missing, "dual_bound", reported.dual_bound)
 
-        _record_reported_metric(values, missing, "solver_time_seconds", reported.solver_time_seconds)
+        _record_reported_metric(
+            values, missing, "solver_time_seconds", reported.solver_time_seconds
+        )
 
         for metric_name, reported_value in reported.statistics.items():
             if metric_name in COMMON_STATISTICS:

@@ -11,13 +11,13 @@ from mlflow_optimization.features.metadata.types import (
     ReportedMetadata,
     SolverParameter,
 )
+from mlflow_optimization.features.metrics.normalize import normalize_metrics
 from mlflow_optimization.features.metrics.types import (
     MissingReason,
-    ObjectiveSense,
     NormalizedMetrics,
+    ObjectiveSense,
     ReportedMetrics,
 )
-from mlflow_optimization.features.metrics.normalize import normalize_metrics
 from mlflow_optimization.features.outcomes.classify import (
     classify_outcome,
     outcome_tags,
@@ -242,7 +242,7 @@ def test_no_solution_discards_a_bogus_objective_but_keeps_a_finite_bound() -> No
             normalized.tags[f"optimization.missing.{metric_name}"]
             == MissingReason.NO_SOLUTION.value
         )
-    assert f"optimization.missing.dual_bound" not in normalized.tags
+    assert "optimization.missing.dual_bound" not in normalized.tags
 
 
 def test_non_finite_common_and_native_metrics_are_not_recorded() -> None:

@@ -9,9 +9,9 @@ from mlflow_optimization.common.diagnostics import warn
 
 from .types import Annotation, UserMetric
 
-
 _annotation_context: ContextVar[Annotation] = ContextVar(
-    "annotation_context", default=Annotation()
+    "annotation_context",
+    default=Annotation(),  # noqa: B039 -- context() copies tags before merging.
 )
 
 
@@ -41,9 +41,7 @@ def context(
     merged_annotation: Annotation = Annotation(
         instance=instance if instance is not None else enclosing_annotation.instance,
         description=(
-            description
-            if description is not None
-            else enclosing_annotation.description
+            description if description is not None else enclosing_annotation.description
         ),
         tags=merged_tags,
     )

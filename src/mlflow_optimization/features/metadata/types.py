@@ -29,7 +29,7 @@ class ReportedMetadata:
     solver: str | None = None
     api_version: str | None = None
     solver_version: str | None = None
-    problem: Mapping[str, int | float | str | bool] = field(default_factory=dict)
+    problem: Mapping[str, float | str | bool] = field(default_factory=dict)
     parameters: Sequence[SolverParameter] = ()
     wall_time_includes_problem_build: bool = False
 

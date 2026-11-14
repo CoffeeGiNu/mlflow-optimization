@@ -2,6 +2,7 @@
 
 import math
 from collections.abc import Callable
+from typing import cast
 
 import pytest
 from conftest import Tracking
@@ -154,8 +155,9 @@ def test_node_limit_records_nonzero_gap(tracking: Tracking, maximize: bool) -> N
             )
             <= 180
         )
-    expression: mathopt.LinearBase = sum(
-        (index * 11 % 37 + 1) * variables[index] for index in range(60)
+    expression: mathopt.LinearBase = cast(
+        mathopt.LinearBase,
+        sum((index * 11 % 37 + 1) * variables[index] for index in range(60)),
     )
     if maximize:
         model.maximize(expression)

@@ -53,13 +53,13 @@ IMPORT_CONTAINERS: frozenset[str] = frozenset(
         f"{PACKAGE_NAME}.features.runs",
     }
 )
-ORTOOLS_SUBMODULES: frozenset[str] = frozenset(
-    {"math_opt", "sat", "constraint_solver"}
-)
+ORTOOLS_SUBMODULES: frozenset[str] = frozenset({"math_opt", "sat", "constraint_solver"})
 
 
 def _module_name(source_file: Path) -> str:
-    relative_parts: tuple[str, ...] = source_file.relative_to(SOURCE_ROOT).with_suffix("").parts
+    relative_parts: tuple[str, ...] = (
+        source_file.relative_to(SOURCE_ROOT).with_suffix("").parts
+    )
     if relative_parts[-1] == "__init__":
         relative_parts = relative_parts[:-1]
     return ".".join((PACKAGE_NAME, *relative_parts))
@@ -73,7 +73,9 @@ def _package_name(module_name: str, source_file: Path) -> str:
 
 def _relative_import_base(package_name: str, import_node: ast.ImportFrom) -> str:
     package_parts: list[str] = package_name.split(".")
-    parent_parts: list[str] = package_parts[: len(package_parts) - import_node.level + 1]
+    parent_parts: list[str] = package_parts[
+        : len(package_parts) - import_node.level + 1
+    ]
     if import_node.module is not None:
         parent_parts.extend(import_node.module.split("."))
     return ".".join(parent_parts)
@@ -107,7 +109,10 @@ def _imported_modules(
 
 def _is_standard_library_module(module_name: str) -> bool:
     module_root: str = module_name.partition(".")[0]
-    return module_root in sys.stdlib_module_names or module_root in sys.builtin_module_names
+    return (
+        module_root in sys.stdlib_module_names
+        or module_root in sys.builtin_module_names
+    )
 
 
 def _is_package_module(module_name: str, package_name: str) -> bool:
@@ -123,7 +128,11 @@ def _feature_name(module_name: str) -> str | None:
 
 def _feature_module_name(module_name: str, feature_name: str) -> str:
     feature_prefix: str = f"{PACKAGE_NAME}.features.{feature_name}"
-    return module_name.removeprefix(f"{feature_prefix}.") if module_name != feature_prefix else ""
+    return (
+        module_name.removeprefix(f"{feature_prefix}.")
+        if module_name != feature_prefix
+        else ""
+    )
 
 
 def _integration_name(module_name: str) -> str | None:
@@ -185,7 +194,10 @@ def _check_feature_import(
     allowed_modules: frozenset[str] | None = FEATURE_IMPORT_RULES[source_feature].get(
         target_feature
     )
-    if allowed_modules is None and target_feature in FEATURE_IMPORT_RULES[source_feature]:
+    if (
+        allowed_modules is None
+        and target_feature in FEATURE_IMPORT_RULES[source_feature]
+    ):
         return None
     target_feature_module: str = _feature_module_name(target_module, target_feature)
     if allowed_modules is not None and target_feature_module in allowed_modules:
@@ -225,10 +237,10 @@ def _check_integration_import(
         return f"{relative_path}: unknown integration '{source_integration}'"
     if target_feature is not None:
         feature_module: str = _feature_module_name(target_module, target_feature)
-        if (
-            target_feature in FEATURE_IMPORT_RULES
-            and feature_module in {"types", "ports"}
-        ):
+        if target_feature in FEATURE_IMPORT_RULES and feature_module in {
+            "types",
+            "ports",
+        }:
             return None
         return f"{relative_path}: integration '{source_integration}' imports feature module '{target_module}'"
     for allowed_sdk_prefix in INTEGRATION_SDK_PREFIXES[source_integration]:
@@ -262,9 +274,7 @@ def _architecture_violations() -> list[str]:
         for import_node in ast.walk(syntax_tree):
             if not isinstance(import_node, (ast.Import, ast.ImportFrom)):
                 continue
-            for target_module in sorted(
-                _imported_modules(package_name, import_node)
-            ):
+            for target_module in sorted(_imported_modules(package_name, import_node)):
                 if source_feature is not None:
                     feature_violation: str | None = _check_feature_import(
                         source_file,

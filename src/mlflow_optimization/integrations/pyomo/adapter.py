@@ -4,10 +4,10 @@ import importlib
 import inspect
 import math
 import pkgutil
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import timedelta
 from functools import wraps
-from typing import Any
+from typing import Any, cast
 
 from mlflow_optimization.common.patching import Patch, receiver_of
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
@@ -451,34 +451,36 @@ class PyomoAdapter:
             solutions: Any | None = self._read(source, "solution")[0]
             if solutions is None:
                 continue
-            solution_count: int | None = None
+            legacy_solution_count: int | None = None
             try:
-                solution_count = len(solutions)
-            except Exception:
+                legacy_solution_count = len(solutions)
+            except Exception:  # noqa: BLE001,S112
                 continue
-            if solution_count is None or solution_count == 0:
+            if legacy_solution_count is None or legacy_solution_count == 0:
                 continue
             try:
                 for solution in solutions:
-                    solution_status: Any | None = self._read(solution, "status")[0]
-                    solution_status_name: str | None = self._native_name(
-                        solution_status
+                    legacy_solution_status: Any | None = self._read(solution, "status")[
+                        0
+                    ]
+                    legacy_status_name: str | None = self._native_name(
+                        legacy_solution_status
                     )
-                    if solution_status_name is None:
+                    if legacy_status_name is None:
                         continue
-                    normalized_status: str = solution_status_name.rsplit(".", 1)[
+                    legacy_normalized_status: str = legacy_status_name.rsplit(".", 1)[
                         -1
                     ].casefold()
-                    if normalized_status in (
+                    if legacy_normalized_status in (
                         "feasible",
                         "optimal",
                         "globallyoptimal",
                         "locallyoptimal",
                     ):
                         has_feasible_legacy_solution = True
-                    elif normalized_status in ("infeasible", "error"):
+                    elif legacy_normalized_status in ("infeasible", "error"):
                         has_infeasible_legacy_solution = True
-            except Exception:
+            except Exception:  # noqa: BLE001,S112
                 continue
         if has_feasible_legacy_solution:
             return True
@@ -608,7 +610,8 @@ class PyomoAdapter:
         bound_arguments: Mapping[str, Any],
         error: BaseException | None,
     ) -> ReportedMetadata:
-        problem: dict[str, int | float | str | bool] = self._model_size(model)
+        problem: dict[str, int | float | str | bool] = {}
+        problem.update(self._model_size(model))
         if not problem and error is None:
             problem.update(self._result_size(result))
         parameters: tuple[SolverParameter, ...] = self._parameters(
@@ -639,7 +642,7 @@ class PyomoAdapter:
         except (ImportError, AttributeError):
             variables = ()
             variable_count_available: bool = False
-        except Exception:
+        except Exception:  # noqa: BLE001
             variables = ()
             variable_count_available = False
         else:
@@ -654,7 +657,7 @@ class PyomoAdapter:
         except (ImportError, AttributeError):
             constraints = ()
             constraint_count_available: bool = False
-        except Exception:
+        except Exception:  # noqa: BLE001
             constraints = ()
             constraint_count_available = False
         else:
@@ -667,7 +670,7 @@ class PyomoAdapter:
                     is_integer: bool = bool(variable.is_integer())
                 except (AttributeError, TypeError):
                     integer_count_available = False
-                except Exception:
+                except Exception:  # noqa: BLE001
                     integer_count_available = False
                 else:
                     integer_count += int(is_integer)
@@ -690,7 +693,7 @@ class PyomoAdapter:
             objects: tuple[Any, ...] = tuple(
                 model.component_data_objects(component_type, active=True)
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
         return objects
 
@@ -730,7 +733,7 @@ class PyomoAdapter:
             try:
                 if len(solutions) > 0:
                     first_solution = solutions[0]
-            except Exception:
+            except Exception:  # noqa: BLE001
                 first_solution = None
             if first_solution is None:
                 continue
@@ -782,11 +785,14 @@ class PyomoAdapter:
         for result_source in result_sources:
             for field_name in ("best_objective_bound", "objective_bound"):
                 value: Any | None = self._read(result_source, field_name)[0]
-                number: float | None = self._native_number(value, native_solver)
-                if number is not None:
-                    if math.isinf(number) and termination is not Termination.UNBOUNDED:
+                bound_number: float | None = self._native_number(value, native_solver)
+                if bound_number is not None:
+                    if (
+                        math.isinf(bound_number)
+                        and termination is not Termination.UNBOUNDED
+                    ):
                         continue
-                    return number
+                    return bound_number
         bound_name: str | None = (
             "Lower bound"
             if sense is ObjectiveSense.MINIMIZE
@@ -869,12 +875,12 @@ class PyomoAdapter:
             )
             if cumulative_solver_time is None:
                 for result_source in result_sources:
-                    timing_information: Any | None = self._read(
+                    result_timing_information: Any | None = self._read(
                         result_source,
                         "timing_info",
                     )[0]
                     timing_value: Any | None = self._read(
-                        timing_information,
+                        result_timing_information,
                         "highs_time",
                     )[0]
                     if isinstance(timing_value, timedelta):
@@ -883,14 +889,13 @@ class PyomoAdapter:
                         cumulative_solver_time = self._number(timing_value)
                     if cumulative_solver_time is not None:
                         break
-            if (
-                cumulative_solver_time is None
-                or cumulative_solver_time < previous_time
-            ):
+            if cumulative_solver_time is None or cumulative_solver_time < previous_time:
                 return MissingReason.UNSUPPORTED
             return cumulative_solver_time - previous_time
         if engine == "gurobi":
-            runtime: float | None = self._number(self._read(native_solver, "Runtime")[0])
+            runtime: float | None = self._number(
+                self._read(native_solver, "Runtime")[0]
+            )
             if runtime is not None:
                 return runtime
         for result_source in result_sources:
@@ -1015,7 +1020,7 @@ class PyomoAdapter:
             value: Any = method()
         except AttributeError:
             return None
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
         return self._number(value)
 
@@ -1098,7 +1103,7 @@ class PyomoAdapter:
         item_count: int | None = None
         try:
             item_count = len(section)
-        except Exception:
+        except Exception:  # noqa: BLE001
             item_count = None
         if item_count is None:
             return ()
@@ -1107,7 +1112,7 @@ class PyomoAdapter:
             item: Any | None = None
             try:
                 item = section[index]
-            except Exception:
+            except Exception:  # noqa: BLE001
                 item = None
             if item is not None:
                 items.append(item)
@@ -1126,7 +1131,7 @@ class PyomoAdapter:
             value: Any = owner[key]
         except (AttributeError, KeyError, TypeError):
             return None, MissingReason.FAILED
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None, MissingReason.FAILED
         if value is None:
             return None, MissingReason.UNDEFINED
@@ -1191,8 +1196,10 @@ class PyomoAdapter:
         user_values_member: Any | None = self._read(configuration, "user_values")[0]
         if callable(user_values_member):
             try:
-                configuration_values: Any = tuple(user_values_member())
-            except Exception:
+                configuration_values: Any = tuple(
+                    cast(Iterable[Any], user_values_member())
+                )
+            except Exception:  # noqa: BLE001
                 configuration_values = None
         else:
             configuration_values = user_values_member
@@ -1273,7 +1280,7 @@ class PyomoAdapter:
                 if callable(value):
                     try:
                         value = value(accessValue=False)
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         value = None
                 default: Any | None = self._read(parameter_item, "_default")[0]
                 is_user_set: Any | None = self._read(parameter_item, "_userSet")[0]
@@ -1349,9 +1356,8 @@ class PyomoAdapter:
                 )
             )
             if all(version_part is not None for version_part in version_parts):
-                return ".".join(
-                    str(int(version_part)) for version_part in version_parts
-                )
+                checked_version_parts = cast(tuple[float, float, float], version_parts)
+                return ".".join(str(int(part)) for part in checked_version_parts)
         if native_solver is not None:
             for method_name in ("version", "getVersion"):
                 version_member: Any | None = self._read(native_solver, method_name)[0]
@@ -1359,19 +1365,19 @@ class PyomoAdapter:
                     native_version: Any | None = None
                     try:
                         native_version = version_member()
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         native_version = None
                     if native_version is not None:
-                        version: str | None = self._string(native_version)
-                        if version is not None:
-                            return version
+                        native_version_string: str | None = self._string(native_version)
+                        if native_version_string is not None:
+                            return native_version_string
         if engine == "scip":
             return None
         solver_version: Any | None = self._read(solver, "_version")[0]
         if solver_version is not None:
-            version: str | None = self._string(solver_version)
-            if version is not None:
-                return version
+            configured_solver_version: str | None = self._string(solver_version)
+            if configured_solver_version is not None:
+                return configured_solver_version
         engine_module: str | None = None
         if native_solver is not None:
             engine_module = type(native_solver).__module__.split(".", 1)[0]
@@ -1382,9 +1388,9 @@ class PyomoAdapter:
                 module = None
             module_version: Any | None = self._read(module, "__version__")[0]
             if module_version is not None:
-                version = self._string(module_version)
-                if version is not None:
-                    return version
+                module_solver_version: str | None = self._string(module_version)
+                if module_solver_version is not None:
+                    return module_solver_version
         result_sources: tuple[Any, ...] = self._result_sources(solver, result)
         for result_source in result_sources:
             solver_result: Any | None = self._read(result_source, "solver")[0]
@@ -1401,7 +1407,7 @@ class PyomoAdapter:
             if callable(version_method):
                 try:
                     version_value: Any = version_method()
-                except Exception:
+                except Exception:  # noqa: BLE001
                     return None
                 return self._string(version_value)
         return None
@@ -1415,7 +1421,7 @@ class PyomoAdapter:
             value: Any = getattr(owner, name)
         except AttributeError:
             return None, MissingReason.UNSUPPORTED
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None, MissingReason.FAILED
         if value is None:
             return None, MissingReason.UNDEFINED
@@ -1433,7 +1439,7 @@ class PyomoAdapter:
             return str(value)
         except (TypeError, ValueError):
             return None
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     def _string(self, value: Any | None) -> str | None:
@@ -1443,7 +1449,7 @@ class PyomoAdapter:
             return str(value)
         except (TypeError, ValueError):
             return None
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     def _number(self, value: Any | None) -> float | None:
@@ -1451,7 +1457,7 @@ class PyomoAdapter:
             return None
         try:
             number: float = float(value)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
         return number
 
@@ -1485,7 +1491,7 @@ class PyomoAdapter:
                 engine_module: Any = importlib.import_module("gurobipy")
             except ImportError:
                 return None
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return None
             grb_namespace: Any | None = self._read(engine_module, "GRB")[0]
             infinity_value: Any | None = self._read(grb_namespace, "INFINITY")[0]

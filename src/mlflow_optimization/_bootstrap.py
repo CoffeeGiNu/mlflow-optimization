@@ -10,14 +10,17 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from mlflow_optimization.features.autolog.ports import SolverIntegration
     from mlflow_optimization.features.autolog.service import AutologManager
-    from mlflow_optimization.features.runs.types import RecordOptions
     from mlflow_optimization.features.runs.record import RecordSolve
+    from mlflow_optimization.features.runs.types import RecordOptions
     from mlflow_optimization.integrations.mlflow.artifacts import MlflowArtifactStore
     from mlflow_optimization.integrations.mlflow.runs import MlflowRunStore
 
 INTEGRATION_MODULES: dict[str, tuple[str, str]] = {
     "gurobipy": ("mlflow_optimization.integrations.gurobipy.adapter", "GurobiAdapter"),
-    "pyscipopt": ("mlflow_optimization.integrations.pyscipopt.adapter", "PyScipOptAdapter"),
+    "pyscipopt": (
+        "mlflow_optimization.integrations.pyscipopt.adapter",
+        "PyScipOptAdapter",
+    ),
     "pyomo": ("mlflow_optimization.integrations.pyomo.adapter", "PyomoAdapter"),
     "mathopt": ("mlflow_optimization.integrations.mathopt.adapter", "MathOptAdapter"),
     "cp_sat": ("mlflow_optimization.integrations.cp_sat.adapter", "CpSatAdapter"),
@@ -47,9 +50,11 @@ def configure(
 
     if _autolog_manager is None:
         from mlflow_optimization.features.autolog.service import AutologManager
-        from mlflow_optimization.features.runs.types import RecordOptions
         from mlflow_optimization.features.runs.record import RecordSolve
-        from mlflow_optimization.integrations.mlflow.artifacts import MlflowArtifactStore
+        from mlflow_optimization.features.runs.types import RecordOptions
+        from mlflow_optimization.integrations.mlflow.artifacts import (
+            MlflowArtifactStore,
+        )
         from mlflow_optimization.integrations.mlflow.runs import MlflowRunStore
 
         run_store: MlflowRunStore = MlflowRunStore()
@@ -61,7 +66,9 @@ def configure(
                 log_solver_metrics=log_solver_metrics,
                 log_artifacts=log_artifacts,
             )
-        record_solve: RecordSolve = RecordSolve(run_store, artifact_store, record_options)
+        record_solve: RecordSolve = RecordSolve(
+            run_store, artifact_store, record_options
+        )
         autolog_manager: AutologManager = AutologManager(record_solve)
 
         _record_solve = record_solve
@@ -85,9 +92,7 @@ def _resolve_integrations(libraries: Iterable[str] | None) -> list[SolverIntegra
     """The selected solver integrations."""
     library_modules: dict[str, tuple[str, str]] = dict(INTEGRATION_MODULES)
     selected_libraries: tuple[str, ...] = (
-        tuple(library_modules)
-        if libraries is None
-        else tuple(dict.fromkeys(libraries))
+        tuple(library_modules) if libraries is None else tuple(dict.fromkeys(libraries))
     )
 
     for library_name in selected_libraries:

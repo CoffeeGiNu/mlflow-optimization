@@ -1,7 +1,7 @@
 """The MathOpt solver integration."""
 
 import dataclasses
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import timedelta
 from enum import Enum
 from functools import wraps
@@ -13,6 +13,7 @@ import ortools
 from ortools.math_opt.python import mathopt
 from ortools.math_opt.python import solve as mathopt_solve
 from ortools.math_opt.python.model import Model
+from ortools.math_opt.python.objectives import Objective
 from ortools.math_opt.python.parameters import SolveParameters, SolverType
 from ortools.math_opt.python.result import SolveResult
 
@@ -198,8 +199,14 @@ class MathOptAdapter:
     ) -> SolverType | None:
         """The solver type supplied to a MathOpt entry point."""
         if entry_point == "incremental":
-            solver_type: object = self._guarded_attribute(receiver, "_solver_type")
-            return solver_type if isinstance(solver_type, SolverType) else None
+            incremental_solver_type: object = self._guarded_attribute(
+                receiver, "_solver_type"
+            )
+            return (
+                incremental_solver_type
+                if isinstance(incremental_solver_type, SolverType)
+                else None
+            )
         solver_type: object = call_keywords.get("solver_type", _UNAVAILABLE)
         if solver_type is _UNAVAILABLE and len(call_arguments) > 1:
             solver_type = call_arguments[1]
@@ -214,8 +221,8 @@ class MathOptAdapter:
     ) -> Model | None:
         """The model supplied to a MathOpt entry point."""
         if entry_point == "incremental":
-            model: object = self._guarded_attribute(receiver, "_model")
-            return model if isinstance(model, Model) else None
+            incremental_model: object = self._guarded_attribute(receiver, "_model")
+            return incremental_model if isinstance(incremental_model, Model) else None
         model: object = call_keywords.get("opt_model", _UNAVAILABLE)
         if model is _UNAVAILABLE and call_arguments:
             model = call_arguments[0]
@@ -237,12 +244,12 @@ class MathOptAdapter:
     ) -> ReportedOutcome:
         """The MathOpt termination status and primal solution availability."""
         if error is not None:
-            termination: Termination = (
+            error_termination: Termination = (
                 Termination.INTERRUPTED
                 if isinstance(error, KeyboardInterrupt)
                 else Termination.ERROR
             )
-            return ReportedOutcome(type(error).__name__, termination, None)
+            return ReportedOutcome(type(error).__name__, error_termination, None)
         if result is None:
             return ReportedOutcome("unknown", Termination.UNKNOWN, None)
         termination_value: object = self._guarded_attribute(result, "termination")
@@ -355,7 +362,9 @@ class MathOptAdapter:
         """Whether a MathOpt objective has nonzero terms or an offset."""
         if model is None:
             return None
-        objective: object = self._guarded_attribute(model, "objective")
+        objective: Objective = cast(
+            Objective, self._guarded_attribute(model, "objective")
+        )
         try:
             linear_terms: object = tuple(objective.linear_terms())
         except _SDK_EXCEPTION:
@@ -515,7 +524,9 @@ class MathOptAdapter:
         if not callable(variables_method):
             return None
         try:
-            variables: tuple[object, ...] = tuple(variables_method())
+            variables: tuple[object, ...] = tuple(
+                cast(Iterable[object], variables_method())
+            )
         except _SDK_EXCEPTION:
             return None
         for variable in variables:
@@ -684,7 +695,7 @@ class MathOptAdapter:
         if not callable(variables_method):
             return problem
         try:
-            variables: object = tuple(variables_method())
+            variables: object = tuple(cast(Iterable[object], variables_method()))
         except _SDK_EXCEPTION:
             return problem
         if isinstance(variables, tuple):
@@ -782,18 +793,18 @@ class MathOptAdapter:
                 mapping_items = tuple(parameter_value.items())
             except _SDK_EXCEPTION:
                 return
-            for nested_name, nested_value in mapping_items:
-                if not isinstance(nested_name, str):
+            for mapping_name, nested_value in mapping_items:
+                if not isinstance(mapping_name, str):
                     continue
                 try:
                     nested_default: object = default_mapping.get(
-                        nested_name,
+                        mapping_name,
                         _UNAVAILABLE,
                     )
                 except _SDK_EXCEPTION:
                     nested_default = _UNAVAILABLE
                 self._append_parameters(
-                    f"{parameter_name}.{nested_name}",
+                    f"{parameter_name}.{mapping_name}",
                     nested_value,
                     nested_default,
                     parameters,
@@ -811,17 +822,17 @@ class MathOptAdapter:
             except _SDK_EXCEPTION:
                 return
             for parameter_field in nested_fields:
-                nested_name: str = parameter_field.name
+                nested_name: str = cast(str, parameter_field.name)
                 nested_value: object = self._guarded_attribute(
                     parameter_value, nested_name
                 )
-                nested_default: object = self._guarded_attribute(
+                field_default: object = self._guarded_attribute(
                     default_object, nested_name
                 )
                 self._append_parameters(
                     f"{parameter_name}.{nested_name}",
                     nested_value,
-                    nested_default,
+                    field_default,
                     parameters,
                     suppress_strings,
                 )

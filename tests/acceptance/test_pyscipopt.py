@@ -6,10 +6,14 @@ import math
 from typing import Any
 
 import pytest
-from mlflow.entities import Run
-from pyscipopt import Model, SCIP_PARAMSETTING, quicksum
-
 from conftest import Tracking
+from mlflow.entities import Run
+from pyscipopt import (
+    SCIP_PARAMSETTING,  # pyright: ignore[reportPrivateImportUsage] -- Runtime re-export used by the tests.
+    Model,  # pyright: ignore[reportAssignmentType] -- The test rebinds this export.
+    quicksum,
+)
+
 from mlflow_optimization import autolog
 
 
@@ -270,7 +274,9 @@ def test_disable_preserves_a_user_model_subclass_binding(tracking: Tracking) -> 
     try:
         autolog(libraries=["pyscipopt"])
 
-        class Model(Model):
+        model_base: Any = globals()["Model"]
+
+        class Model(model_base):
             """A user-defined PySCIPOpt model."""
 
         user_model: type[Any] = Model

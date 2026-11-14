@@ -11,9 +11,8 @@ from uuid import uuid4
 
 from mlflow_optimization.common.diagnostics import warn
 
-from .types import CompletedSolve, SolveObservation
 from .ports import SolverIntegration, SolveSink
-
+from .types import CompletedSolve, SolveObservation
 
 _solve_indices: Iterator[int] = count(1)
 _solve_index_lock: Lock = Lock()
@@ -26,7 +25,9 @@ class _SolveScope:
         self.active: bool = True
 
 
-_observing: ContextVar[_SolveScope | None] = ContextVar("autolog_observing", default=None)
+_observing: ContextVar[_SolveScope | None] = ContextVar(
+    "autolog_observing", default=None
+)
 
 
 class AutologManager:
@@ -76,7 +77,7 @@ class AutologManager:
                 try:
                     return operation()
                 # NOTE: A defect in logging must never change the result of the user's solve.
-                except Exception as exception:
+                except Exception as exception:  # noqa: BLE001
                     failures.append(
                         f"Solve {step} failed for {api}: "
                         f"{type(exception).__name__}: {exception}"
@@ -96,7 +97,7 @@ class AutologManager:
                 try:
                     observation = extract(result, solve.error)
                 # NOTE: A defect in extraction must never change the result of the user's solve.
-                except Exception as exception:
+                except Exception as exception:  # noqa: BLE001
                     failures.append(
                         f"Solve extraction failed for {api}: "
                         f"{type(exception).__name__}: {exception}"
@@ -111,8 +112,14 @@ class AutologManager:
                 scope.active = False
                 end_time_ms: int = int(time() * 1000)
                 solve: CompletedSolve = CompletedSolve(
-                    api, solve_id, solve_index, start_time_ms, end_time_ms,
-                    end - start, None, error,
+                    api,
+                    solve_id,
+                    solve_index,
+                    start_time_ms,
+                    end_time_ms,
+                    end - start,
+                    None,
+                    error,
                 )
                 guard("recording", lambda: finish(solve))
                 for failure in failures:
@@ -122,8 +129,14 @@ class AutologManager:
             scope.active = False
             end_time_ms = int(time() * 1000)
             solve = CompletedSolve(
-                api, solve_id, solve_index, start_time_ms, end_time_ms,
-                end - start, None, None,
+                api,
+                solve_id,
+                solve_index,
+                start_time_ms,
+                end_time_ms,
+                end - start,
+                None,
+                None,
             )
             guard("recording", lambda: finish(solve))
             for failure in failures:

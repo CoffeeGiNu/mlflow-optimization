@@ -2,6 +2,7 @@ import math
 from pathlib import Path
 
 import pytest
+from conftest import Tracking
 from mlflow.entities import FileInfo, Run
 from ortools.constraint_solver import (
     pywrapcp,
@@ -9,7 +10,6 @@ from ortools.constraint_solver import (
     routing_parameters_pb2,
 )
 
-from conftest import Tracking
 from mlflow_optimization import SolveRun, autolog, last_solve
 
 DISTANCE_MATRIX: tuple[tuple[int, ...], ...] = (
@@ -56,9 +56,7 @@ def test_routing_fast_failed_assignment_is_not_recorded_as_a_solution(
     routing_index_manager: pywrapcp.RoutingIndexManager = pywrapcp.RoutingIndexManager(
         6, 1, 0
     )
-    routing_model: pywrapcp.RoutingModel = pywrapcp.RoutingModel(
-        routing_index_manager
-    )
+    routing_model: pywrapcp.RoutingModel = pywrapcp.RoutingModel(routing_index_manager)
 
     def arc_cost(from_index: int, to_index: int) -> int:
         from_location: int = routing_index_manager.IndexToNode(from_index)

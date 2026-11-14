@@ -150,6 +150,8 @@ class CpSatAdapter:
         return ReportedOutcome(raw_status, termination, has_solution)
 
     def _read_raw_status(self, result: Any | None) -> str:
+        if result is None:
+            return "unknown"
         status_names: dict[Any, str] = {
             cp_model.OPTIMAL: "OPTIMAL",
             cp_model.FEASIBLE: "FEASIBLE",
@@ -161,11 +163,11 @@ class CpSatAdapter:
         if status_name == "unknown":
             try:
                 status_name = str(result.name)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 status_name = "unknown"
         try:
             status_code: int = int(result)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return status_name
         if status_name == "unknown":
             return f"unknown ({status_code})"
@@ -180,11 +182,11 @@ class CpSatAdapter:
             return None
         try:
             variable_count: int = len(model.proto.variables)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
         try:
             solution_count: int = len(solver.response_proto.solution)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
         if variable_count == 0:
             return None
@@ -235,21 +237,21 @@ class CpSatAdapter:
             return None
         try:
             model_proto: Any = model.proto
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
         has_floating_point_objective: bool | None = None
         try:
             has_floating_point_objective = bool(
                 model_proto.has_floating_point_objective()
             )
-        except Exception:
+        except Exception:  # noqa: BLE001,S110
             pass
         if has_floating_point_objective is True:
             return True
         has_integer_objective: bool | None = None
         try:
             has_integer_objective = bool(model_proto.has_objective())
-        except Exception:
+        except Exception:  # noqa: BLE001,S110
             pass
         if has_integer_objective is True:
             return True
@@ -266,28 +268,26 @@ class CpSatAdapter:
             return None
         try:
             model_proto: Any = model.proto
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
         has_floating_point_objective: bool | None = None
         try:
             has_floating_point_objective = bool(
                 model_proto.has_floating_point_objective()
             )
-        except Exception:
+        except Exception:  # noqa: BLE001,S110
             pass
         if has_floating_point_objective is True:
             try:
-                maximize: bool = bool(
-                    model_proto.floating_point_objective.maximize
-                )
-            except Exception:
+                maximize: bool = bool(model_proto.floating_point_objective.maximize)
+            except Exception:  # noqa: BLE001
                 return None
             return ObjectiveSense.MAXIMIZE if maximize else ObjectiveSense.MINIMIZE
         if has_floating_point_objective is not False:
             return None
         try:
             scaling_factor: float = float(model_proto.objective.scaling_factor)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
         if scaling_factor < 0:
             return ObjectiveSense.MAXIMIZE
@@ -333,7 +333,7 @@ class CpSatAdapter:
         try:
             response: Any = solver.response_proto
             value: float = float(getattr(response, name))
-        except Exception:
+        except Exception:  # noqa: BLE001
             return MissingReason.FAILED
         return value
 
@@ -379,20 +379,21 @@ class CpSatAdapter:
             return {}
         try:
             model_proto: Any = model.proto
-        except Exception:
+        except Exception:  # noqa: BLE001
             return {}
         problem: dict[str, int] = {}
         variables: Any | None = None
         try:
             variables = model_proto.variables
-            variable_count: int = len(variables)
-            problem["num_variables"] = variable_count
-            problem["num_integer_variables"] = variable_count
-        except Exception:
+            if variables is not None:
+                variable_count: int = len(variables)
+                problem["num_variables"] = variable_count
+                problem["num_integer_variables"] = variable_count
+        except Exception:  # noqa: BLE001
             variables = None
         try:
             problem["num_constraints"] = len(model_proto.constraints)
-        except Exception:
+        except Exception:  # noqa: BLE001,S110
             pass
         if variables is not None:
             boolean_variable_count: int = 0
@@ -402,7 +403,7 @@ class CpSatAdapter:
                     domain: list[int] = list(variable.domain)
                     if domain == [0, 1]:
                         boolean_variable_count += 1
-                except Exception:
+                except Exception:  # noqa: BLE001
                     boolean_variable_count_known = False
             if boolean_variable_count_known:
                 problem["num_boolean_variables"] = boolean_variable_count
@@ -412,7 +413,7 @@ class CpSatAdapter:
         try:
             configured_parameters: Any = solver.parameters
             default_parameters: Any = sat_parameters_pb2.SatParameters()
-        except Exception:
+        except Exception:  # noqa: BLE001
             return ()
         parameters: list[SolverParameter] = []
         parameter: SolverParameter | None
@@ -431,7 +432,7 @@ class CpSatAdapter:
                     field,
                 )
                 parameter = SolverParameter(field.name, value, ParameterOrigin.EXPLICIT)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 parameter = None
             if parameter is not None:
                 parameters.append(parameter)
@@ -443,9 +444,13 @@ class CpSatAdapter:
                 return str(list(value))
             enum_values: list[str | int] = []
             for number in value:
-                enum_value: Any | None = field.enum_type.values_by_number.get(number)
+                repeated_enum_value: Any | None = field.enum_type.values_by_number.get(
+                    number
+                )
                 enum_values.append(
-                    str(enum_value.name) if enum_value is not None else number
+                    str(repeated_enum_value.name)
+                    if repeated_enum_value is not None
+                    else number
                 )
             return str(enum_values)
         if field.enum_type is not None:

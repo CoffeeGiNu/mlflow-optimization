@@ -4,14 +4,15 @@ import math
 import os
 import subprocess
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from mlflow.entities import Run
 from pyomo.environ import (
-    Binary,
+    Binary,  # pyright: ignore[reportAttributeAccessIssue] -- Exported by Pyomo at runtime.
     ConcreteModel,
     Constraint,
     Objective,
@@ -143,7 +144,7 @@ def test_highs_node_limit_records_nonzero_gap(
         rule=lambda model, constraint_index: (
             sum(
                 ((index * 17 + constraint_index * 13) % 31 + 1) * model.variables[index]
-                for index in model.indices
+                for index in cast(Iterable[int], model.indices)
             )
             <= 180
         ),
@@ -152,7 +153,8 @@ def test_highs_node_limit_records_nonzero_gap(
     model.objective = Objective(
         expr=direction
         * sum(
-            (index * 11 % 37 + 1) * model.variables[index] for index in model.indices
+            (index * 11 % 37 + 1) * cast(Any, model.variables[index])
+            for index in cast(Iterable[int], model.indices)
         ),
         sense=maximize if maximize_sense else minimize,
     )
@@ -179,8 +181,8 @@ def test_highs_infeasible_run_has_no_objective_or_gap(tracking: Any) -> None:
     solver: Any = _solver_or_skip("highs")
     model: Any = ConcreteModel()
     model.value = Var()
-    model.lower_bound = Constraint(expr=model.value >= 1)
-    model.upper_bound = Constraint(expr=model.value <= 0)
+    model.lower_bound = Constraint(expr=cast(Any, model.value) >= 1)
+    model.upper_bound = Constraint(expr=cast(Any, model.value) <= 0)
     model.objective = Objective(expr=model.value, sense=minimize)
 
     solver.solve(model, load_solutions=False)
@@ -203,7 +205,7 @@ def test_highs_objective_free_run_marks_objective_metrics_undefined(
     solver: Any = _solver_or_skip("highs")
     model: Any = ConcreteModel()
     model.value = Var(bounds=(0, 1))
-    model.lower_bound = Constraint(expr=model.value >= 0.25)
+    model.lower_bound = Constraint(expr=cast(Any, model.value) >= 0.25)
 
     solver.solve(model)
 
@@ -339,13 +341,15 @@ def test_gurobi_direct_solution_limit_records_real_incumbent(tracking: Any) -> N
     model.variables = Var(model.indices, domain=Binary)
     model.capacity = Constraint(
         expr=sum(
-            weights[index] * model.variables[index] for index in model.indices
+            weights[index] * cast(Any, model.variables[index])
+            for index in cast(Iterable[int], model.indices)
         )
         <= capacity
     )
     model.objective = Objective(
         expr=sum(
-            values[index] * model.variables[index] for index in model.indices
+            values[index] * cast(Any, model.variables[index])
+            for index in cast(Iterable[int], model.indices)
         ),
         sense=maximize,
     )
@@ -442,9 +446,9 @@ def test_legacy_solution_entry_status_controls_feasibility(
     autolog(libraries=["pyomo"])
     solver: Any = SolverFactory("gurobi")
     result: SolverResults = SolverResults()
-    solver_information: Any = result.solver.add()
+    solver_information: Any = result.solver.add()  # pyright: ignore[reportCallIssue] -- Pyomo map container is callable at runtime.
     solver_information.termination_condition = termination_condition
-    solution: Any = result.solution.add()
+    solution: Any = result.solution.add()  # pyright: ignore[reportCallIssue] -- Pyomo map container is callable at runtime.
     solution.status = solution_status
     _stub_shell_solver(solver, monkeypatch, result)
 

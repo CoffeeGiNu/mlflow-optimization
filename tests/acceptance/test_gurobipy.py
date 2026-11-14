@@ -2,9 +2,9 @@ from pathlib import Path
 
 import gurobipy
 import pytest
+from conftest import Tracking
 from mlflow.entities import Run
 
-from conftest import Tracking
 from mlflow_optimization import autolog
 
 
@@ -57,7 +57,7 @@ def test_failed_call_after_success_does_not_record_stale_results(
     model.optimize()
 
     with pytest.raises(TypeError):
-        model.optimize(unexpected=True)
+        model.optimize(unexpected=True)  # pyright: ignore[reportCallIssue] -- Intentional invalid-call test.
 
     runs: list[Run] = tracking.solve_runs()
     assert len(runs) == 2
@@ -85,12 +85,12 @@ def test_limited_mip_bound_has_correct_direction(
         60, vtype=gurobipy.GRB.BINARY
     )
     for constraint_index in range(5):
-        model.addConstr(
+        model.addConstr(  # pyright: ignore[reportCallIssue]
             sum(
                 ((index * 17 + constraint_index * 13) % 31 + 1) * variables[index]
                 for index in range(60)
             )
-            <= 180
+            <= 180  # pyright: ignore[reportArgumentType]
         )
     model.setObjective(
         -sense * sum((index * 11 % 37 + 1) * variables[index] for index in range(60)),
@@ -201,7 +201,9 @@ def test_time_limit_with_incumbent_keeps_objective(tracking: Tracking) -> None:
         sum((index + 1) * variables[index] for index in range(4)),
         gurobipy.GRB.MAXIMIZE,
     )
-    model.addConstr(sum(variables.values()) <= 2)
+    model.addConstr(  # pyright: ignore[reportCallIssue,reportArgumentType]
+        sum(variables.values()) <= 2  # pyright: ignore[reportArgumentType]
+    )
 
     model.optimize(_set_time_limit_after_incumbent)
 

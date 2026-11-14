@@ -148,8 +148,8 @@ def test_parallel_thread_solves_are_recorded_separately(tracking: Tracking) -> N
     expected_parameters: dict[str, dict[str, str]] = {}
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         for instance_index in range(worker_count):
-            instance_name: str = f"thread-instance-{instance_index}"
-            expected_parameters[instance_name] = {
+            expected_instance_name: str = f"thread-instance-{instance_index}"
+            expected_parameters[expected_instance_name] = {
                 "solver_param.threads": str(instance_index + 1),
             }
             future: Future[str] = executor.submit(solve_in_thread, instance_index)

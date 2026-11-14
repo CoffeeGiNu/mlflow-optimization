@@ -3,9 +3,12 @@
 from collections.abc import Callable
 
 from mlflow_optimization.common.patching import Patch
-from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.autolog.ports import SolveObserver
-from mlflow_optimization.features.metadata.types import ReportedMetadata, SolverParameter
+from mlflow_optimization.features.autolog.types import SolveObservation
+from mlflow_optimization.features.metadata.types import (
+    ReportedMetadata,
+    SolverParameter,
+)
 from mlflow_optimization.features.metrics.types import (
     MissingReason,
     ObjectiveSense,
@@ -38,7 +41,9 @@ class FakeSolver:
         self.parameters: dict[str, int | float | str | bool] = (
             parameters.copy() if parameters is not None else {}
         )
-        self.statistics: dict[str, float] = statistics.copy() if statistics is not None else {}
+        self.statistics: dict[str, float] = (
+            statistics.copy() if statistics is not None else {}
+        )
         self.raises: BaseException | None = raises
         self.during_solve: Callable[[], None] | None = during_solve
 
@@ -66,7 +71,9 @@ class FakeSolverAdapter:
         """Route fake solver calls through the observer."""
         self._observer = observer
 
-        def factory(original: Callable[[FakeSolver], str]) -> Callable[[FakeSolver], str]:
+        def factory(
+            original: Callable[[FakeSolver], str],
+        ) -> Callable[[FakeSolver], str]:
             def observed(solver: FakeSolver) -> str:
                 def call() -> str:
                     return original(solver)
@@ -90,7 +97,9 @@ class FakeSolverAdapter:
                         else MissingReason.UNSUPPORTED
                     )
                     dual_bound: float | MissingReason = (
-                        solver.bound if solver.bound is not None else MissingReason.UNSUPPORTED
+                        solver.bound
+                        if solver.bound is not None
+                        else MissingReason.UNSUPPORTED
                     )
                     sense: ObjectiveSense = ObjectiveSense(solver.sense)
                     metrics: ReportedMetrics = ReportedMetrics(

@@ -156,14 +156,17 @@ def _wrap_solve_entry_point(
             lambda: int(model.getStage()),
             MissingReason.FAILED,
         )
-        counter_snapshot: tuple[
-            int | MissingReason,
-            dict[str, float | MissingReason],
-        ] | None = None
+        counter_snapshot: (
+            tuple[
+                int | MissingReason,
+                dict[str, float | MissingReason],
+            ]
+            | None
+        ) = None
         counter_cache_available: bool = True
         try:
             counter_snapshot = counter_snapshots.get(model)
-        except Exception:
+        except Exception:  # noqa: BLE001
             counter_cache_available = False
         counters_before_solve: dict[str, float | MissingReason] | None = None
         if not counter_cache_available or isinstance(
@@ -208,7 +211,7 @@ def _wrap_solve_entry_point(
                             stage_after_solve,
                             counters_after_solve,
                         )
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         counter_snapshots.clear()
                 else:
                     try:
@@ -216,7 +219,7 @@ def _wrap_solve_entry_point(
                             MissingReason.FAILED,
                             _unavailable_solve_counters(),
                         )
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         counter_snapshots.clear()
                 return _extract_observation(
                     model,
@@ -244,12 +247,12 @@ def _extract_observation(
 ) -> SolveObservation:
     """The SDK-free observation of one PySCIPOpt optimization call."""
     if error is not None:
-        termination: Termination = (
+        error_termination: Termination = (
             Termination.INTERRUPTED
             if isinstance(error, KeyboardInterrupt)
             else Termination.ERROR
         )
-        metrics: ReportedMetrics = ReportedMetrics(
+        error_metrics: ReportedMetrics = ReportedMetrics(
             has_objective=None,
             sense=None,
             objective_value=MissingReason.FAILED,
@@ -258,17 +261,19 @@ def _extract_observation(
             statistics={},
             native={},
         )
-        metadata: ReportedMetadata = _read_metadata(model, parameters_before_solve)
-        outcome: ReportedOutcome = ReportedOutcome(
+        error_metadata: ReportedMetadata = _read_metadata(
+            model, parameters_before_solve
+        )
+        error_outcome: ReportedOutcome = ReportedOutcome(
             raw_status="unknown",
-            termination=termination,
+            termination=error_termination,
             has_solution=None,
         )
         return SolveObservation(
             api="pyscipopt",
-            outcome=outcome,
-            metrics=metrics,
-            metadata=metadata,
+            outcome=error_outcome,
+            metrics=error_metrics,
+            metadata=error_metadata,
         )
 
     raw_status: str = _read_value(lambda: str(model.getStatus()), "unknown")
@@ -291,6 +296,7 @@ def _extract_observation(
         else None
     )
 
+    gap: float | MissingReason | None = None
     if has_objective is False:
         objective_value: float | MissingReason = MissingReason.UNDEFINED
         dual_bound: float | MissingReason = MissingReason.UNDEFINED
@@ -307,6 +313,11 @@ def _extract_observation(
         else:
             objective_value = _read_scip_number(
                 lambda: float(model.getObjVal()),
+                solver_infinity,
+            )
+        if has_solution is not False:
+            gap = _read_scip_number(
+                lambda: float(model.getGap()),
                 solver_infinity,
             )
 
@@ -360,13 +371,8 @@ def _extract_observation(
         counters_after_solve["presolving_time_seconds"],
         counters_before_solve,
     )
-    if has_solution is not False and has_objective is not False:
-        gap: float | MissingReason = _read_scip_number(
-            lambda: float(model.getGap()),
-            solver_infinity,
-        )
-        if not isinstance(gap, MissingReason):
-            native["gap"] = gap
+    if gap is not None and not isinstance(gap, MissingReason):
+        native["gap"] = gap
 
     metrics: ReportedMetrics = ReportedMetrics(
         has_objective=has_objective,
@@ -414,7 +420,12 @@ def _read_metadata(
     parameters: tuple[SolverParameter, ...],
 ) -> ReportedMetadata:
     """The solver and problem metadata reported by PySCIPOpt."""
-    api_version: str | None = _read_value(lambda: str(pyscipopt.__version__), None)
+    api_version: str | None = _read_value(
+        lambda: str(
+            pyscipopt.__version__  # pyright: ignore[reportPrivateImportUsage] -- Exposed at runtime.
+        ),
+        None,
+    )
     major_version: int | None = _read_value(lambda: int(model.getMajorVersion()), None)
     minor_version: int | None = _read_value(lambda: int(model.getMinorVersion()), None)
     technical_version: int | None = _read_value(
@@ -642,5 +653,5 @@ def _read_value[Value](
     """A PySCIPOpt value or its fallback after a supported read error."""
     try:
         return reader()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return unavailable

@@ -3,10 +3,14 @@
 from collections.abc import Callable
 
 from fakes import FakeSolver
+
 from mlflow_optimization.common.patching import Patch
-from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.autolog.ports import SolveObserver
-from mlflow_optimization.features.metadata.types import ReportedMetadata, SolverParameter
+from mlflow_optimization.features.autolog.types import SolveObservation
+from mlflow_optimization.features.metadata.types import (
+    ReportedMetadata,
+    SolverParameter,
+)
 from mlflow_optimization.features.metrics.types import (
     MissingReason,
     ObjectiveSense,
@@ -66,7 +70,9 @@ class FakeFrontendAdapter:
                         else MissingReason.UNSUPPORTED
                     )
                     dual_bound: float | MissingReason = (
-                        solver.bound if solver.bound is not None else MissingReason.UNSUPPORTED
+                        solver.bound
+                        if solver.bound is not None
+                        else MissingReason.UNSUPPORTED
                     )
                     sense: ObjectiveSense = ObjectiveSense(solver.sense)
                     metrics: ReportedMetrics = ReportedMetrics(

@@ -6,7 +6,6 @@ from typing import Any
 
 import pytest
 
-
 REPOSITORY_ROOT: Path = Path(__file__).resolve().parents[2]
 SOLVER_MODULE_NAMES: tuple[str, ...] = (
     "gurobipy",

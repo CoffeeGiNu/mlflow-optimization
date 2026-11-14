@@ -20,16 +20,16 @@ from mlflow_optimization.features.artifacts.ports import (
 from mlflow_optimization.features.autolog.types import CompletedSolve, SolveObservation
 from mlflow_optimization.features.metadata.collect import collect_metadata
 from mlflow_optimization.features.metadata.types import CollectedMetadata
-from mlflow_optimization.features.metrics.types import NormalizedMetrics
 from mlflow_optimization.features.metrics.normalize import normalize_metrics
+from mlflow_optimization.features.metrics.types import NormalizedMetrics
 from mlflow_optimization.features.outcomes.classify import (
     classify_outcome,
     outcome_tags,
 )
 from mlflow_optimization.features.outcomes.types import SolveOutcome
 
-from .types import RecordOptions, RunReference, RunStatus, SolveRecord
 from .ports import RunStore, RunStoreError
+from .types import RecordOptions, RunReference, RunStatus, SolveRecord
 
 
 @dataclass(frozen=True)
