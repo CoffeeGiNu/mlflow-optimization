@@ -338,6 +338,12 @@ def _read_parameters(model: gurobipy.Model) -> tuple[SolverParameter, ...]:
         except (AttributeError, gurobipy.GurobiError):
             continue
         try:
+            parameter_type: Any = parameter_info[1]
+        except (IndexError, TypeError):
+            continue
+        if parameter_type is str:
+            continue
+        try:
             current_parameter_value: Any = parameter_info[2]
         except (IndexError, TypeError):
             continue
