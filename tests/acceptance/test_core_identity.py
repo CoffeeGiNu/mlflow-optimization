@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Barrier
 from typing import TYPE_CHECKING
 
 import mlflow
+import pytest
 from mlflow.entities import Run, RunData
 from mlflow.tracking.fluent import ActiveRun
 
@@ -184,3 +187,53 @@ def test_parallel_thread_solves_are_recorded_separately(tracking: Tracking) -> N
         range(first_solve_index, first_solve_index + worker_count)
     )
     assert observed_parameters == expected_parameters
+
+
+def test_inherited_async_task_observes_solves_after_outer_solve_ends(
+    tracking: Tracking,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fakes import FakeSolver
+
+    original_solve: Callable[..., str] = FakeSolver.solve
+
+    async def run_inherited_solve() -> tuple[str, str]:
+        outer_solve_finished: asyncio.Event = asyncio.Event()
+        inherited_task: asyncio.Task[str] | None = None
+        schedule_inherited_task: bool = True
+
+        async def solve_after_outer() -> str:
+            await outer_solve_finished.wait()
+            solver: FakeSolver = FakeSolver(parameters={"threads": 2})
+            return solver.solve()
+
+        def schedule_task_during_solve(solver: FakeSolver) -> str:
+            nonlocal inherited_task
+            nonlocal schedule_inherited_task
+            if schedule_inherited_task:
+                schedule_inherited_task = False
+                inherited_task = asyncio.create_task(solve_after_outer())
+            return original_solve(solver)
+
+        monkeypatch.setattr(FakeSolver, "solve", schedule_task_during_solve)
+        autolog(solvers=["fake"])
+        try:
+            outer_result: str = FakeSolver().solve()
+            assert inherited_task is not None
+            outer_solve_finished.set()
+            inherited_result: str = await inherited_task
+            return outer_result, inherited_result
+        finally:
+            outer_solve_finished.set()
+            autolog(disable=True)
+
+    solve_results: tuple[str, str] = asyncio.run(run_inherited_solve())
+    solve_runs: list[Run] = tracking.solve_runs()
+
+    assert solve_results == ("optimal", "optimal")
+    assert len(solve_runs) == 2
+    assert solve_runs[0].data.params == {}
+    assert solve_runs[1].data.params == {"solver_param.threads": "2"}
+    run: Run
+    for run in solve_runs:
+        assert run.data.tags["optimization.api"] == "fake"
