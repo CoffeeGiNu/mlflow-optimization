@@ -27,5 +27,11 @@ class MlflowArtifactStore:
                 local_path=local_path,
                 artifact_path=artifact_path,
             )
-        except (MlflowException, ServerInfoRequestError, RequestException, OSError) as error:
+        except (
+            MlflowException,
+            ServerInfoRequestError,
+            RequestException,
+            OSError,
+            ImportError,
+        ) as error:
             raise ArtifactStoreError("MLflow artifact storage failed.") from error

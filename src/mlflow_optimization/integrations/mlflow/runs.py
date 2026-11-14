@@ -29,6 +29,13 @@ from requests.exceptions import RequestException
 from mlflow_optimization.features.runs.types import RunReference, SolveRecord
 from mlflow_optimization.features.runs.ports import RunStoreError
 
+_RESERVED_KEY_PREFIXES: tuple[str, ...] = ("optimization.", "mlflow.")
+_SOLVE_IDENTITY_TAG_KEYS: tuple[str, ...] = (
+    "optimization.solve_id",
+    "optimization.solve_index",
+    "optimization.error",
+)
+
 
 class MlflowRunStore:
     """Solve runs stored through the MLflow tracking client."""
@@ -42,13 +49,25 @@ class MlflowRunStore:
                 run_id=active_mlflow_run.info.run_id,
                 experiment_id=active_mlflow_run.info.experiment_id,
             )
-        except (MlflowException, ServerInfoRequestError, RequestException, OSError) as error:
+        except (
+            MlflowException,
+            ServerInfoRequestError,
+            RequestException,
+            OSError,
+            ImportError,
+        ) as error:
             raise RunStoreError("MLflow run storage failed.") from error
 
     def save(self: MlflowRunStore, record: SolveRecord, parent: RunReference | None) -> RunReference:
         try:
             return self._save(record, parent)
-        except (MlflowException, ServerInfoRequestError, RequestException, OSError) as error:
+        except (
+            MlflowException,
+            ServerInfoRequestError,
+            RequestException,
+            OSError,
+            ImportError,
+        ) as error:
             raise RunStoreError("MLflow run storage failed.") from error
 
     def _save(self: MlflowRunStore, record: SolveRecord, parent: RunReference | None) -> RunReference:
@@ -70,48 +89,65 @@ class MlflowRunStore:
             resolved_tag_values[MLFLOW_RUN_NAME] = run_name
         context_tag_values: dict[str, Any] = resolve_tags(resolved_tag_values)
 
+        creation_tag_values: dict[str, str] = {}
+        identity_tag_key: str
+        for identity_tag_key in _SOLVE_IDENTITY_TAG_KEYS:
+            if identity_tag_key in context_tag_values:
+                creation_tag_values[identity_tag_key] = _truncate_tag_value(
+                    str(context_tag_values[identity_tag_key])
+                )
+        if parent is not None:
+            creation_tag_values[MLFLOW_PARENT_RUN_ID] = parent.run_id
+
         created_run: Run = tracking_client.create_run(
             experiment_id=experiment_id,
             start_time=record.start_time_ms,
+            tags=creation_tag_values,
             run_name=run_name,
         )
 
-        metric_entities: list[Metric] = []
-        metric_key: str
-        metric_value: float
-        for metric_key, metric_value in record.metrics.items():
-            metric_entities.append(
-                Metric(
-                    key=_sanitize_key(metric_key),
-                    value=metric_value,
-                    timestamp=record.end_time_ms,
-                    step=0,
+        try:
+            metric_entities: list[Metric] = []
+            metric_key: str
+            metric_value: float
+            for metric_key, metric_value in record.metrics.items():
+                metric_entities.append(
+                    Metric(
+                        key=_sanitize_key(metric_key),
+                        value=metric_value,
+                        timestamp=record.end_time_ms,
+                        step=0,
+                    )
                 )
-            )
 
-        parameter_entities: list[Param] = []
-        parameter_key: str
-        parameter_value: str
-        for parameter_key, parameter_value in record.params.items():
-            parameter_entities.append(
-                Param(
-                    key=_sanitize_key(parameter_key),
-                    value=parameter_value[:MAX_PARAM_VAL_LENGTH],
+            parameter_entities: list[Param] = []
+            parameter_key: str
+            parameter_value: str
+            for parameter_key, parameter_value in record.params.items():
+                parameter_entities.append(
+                    Param(
+                        key=_sanitize_key(parameter_key),
+                        value=parameter_value[:MAX_PARAM_VAL_LENGTH],
+                    )
                 )
-            )
 
-        self._log_metric_batches(tracking_client, created_run.info.run_id, metric_entities)
-        self._log_parameter_batches(tracking_client, created_run.info.run_id, parameter_entities)
-        self._log_tag_batches(
-            tracking_client,
-            created_run.info.run_id,
-            _make_tag_entities(context_tag_values),
-        )
-        tracking_client.set_terminated(
-            run_id=created_run.info.run_id,
-            status=record.status.value,
-            end_time=record.end_time_ms,
-        )
+            self._log_metric_batches(tracking_client, created_run.info.run_id, metric_entities)
+            self._log_parameter_batches(
+                tracking_client,
+                created_run.info.run_id,
+                parameter_entities,
+            )
+            self._log_tag_batches(
+                tracking_client,
+                created_run.info.run_id,
+                _make_tag_entities(context_tag_values),
+            )
+        finally:
+            tracking_client.set_terminated(
+                run_id=created_run.info.run_id,
+                status=record.status.value,
+                end_time=record.end_time_ms,
+            )
         return RunReference(
             run_id=created_run.info.run_id,
             experiment_id=created_run.info.experiment_id,
@@ -126,14 +162,26 @@ class MlflowRunStore:
                 value=value,
                 synchronous=True,
             )
-        except (MlflowException, ServerInfoRequestError, RequestException, OSError) as error:
+        except (
+            MlflowException,
+            ServerInfoRequestError,
+            RequestException,
+            OSError,
+            ImportError,
+        ) as error:
             raise RunStoreError("MLflow run storage failed.") from error
 
     def set_tags(self: MlflowRunStore, run: RunReference, tags: Mapping[str, str]) -> None:
         try:
             tracking_client: MlflowClient = MlflowClient(tracking_uri=mlflow.get_tracking_uri())
             self._log_tag_batches(tracking_client, run.run_id, _make_tag_entities(tags))
-        except (MlflowException, ServerInfoRequestError, RequestException, OSError) as error:
+        except (
+            MlflowException,
+            ServerInfoRequestError,
+            RequestException,
+            OSError,
+            ImportError,
+        ) as error:
             raise RunStoreError("MLflow run storage failed.") from error
 
     def _log_metric_batches(
@@ -272,6 +320,11 @@ def _sanitize_key(key: str) -> str:
     sanitized_key: str = "/".join(safe_segments)[:MAX_ENTITY_KEY_LENGTH].rstrip("/")
     if not sanitized_key or path_not_unique(sanitized_key):
         return "_"
+    if (
+        sanitized_key.startswith(_RESERVED_KEY_PREFIXES)
+        and not key.startswith(_RESERVED_KEY_PREFIXES)
+    ):
+        sanitized_key = ("_" + sanitized_key)[:MAX_ENTITY_KEY_LENGTH].rstrip("/")
     return sanitized_key
 
 
