@@ -2,7 +2,6 @@
 
 from math import isfinite
 
-from ...common.diagnostics import warn
 from .types import (
     COMMON_METRICS,
     COMMON_STATISTICS,
@@ -118,7 +117,5 @@ def normalize_metrics(
             api_metric_name: str = f"{api}.{native_name}"
             if isfinite(native_value):
                 values[api_metric_name] = native_value
-            else:
-                warn(f"Skipping non-finite native metric '{api_metric_name}'.")
 
     return NormalizedMetrics(values=values, tags=tags)
