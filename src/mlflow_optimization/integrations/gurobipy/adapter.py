@@ -355,7 +355,8 @@ def _read_parameters(model: gurobipy.Model) -> tuple[SolverParameter, ...]:
             parameter_type: Any = parameter_info[1]
         except Exception:
             continue
-        if parameter_type is str:
+        # NOTE: LicenseID identifies a WLS license.
+        if parameter_type is str or parameter_name == "LicenseID":
             continue
         try:
             current_parameter_value: Any = parameter_info[2]
