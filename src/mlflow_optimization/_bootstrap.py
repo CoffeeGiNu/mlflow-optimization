@@ -76,7 +76,9 @@ def configure(
 def _resolve_integrations(solvers: Iterable[str] | None) -> list[SolverIntegration]:
     """The selected solver integrations."""
     module_names: dict[str, str] = dict(INTEGRATION_MODULES)
-    selected_names: tuple[str, ...] = tuple(module_names) if solvers is None else tuple(solvers)
+    selected_names: tuple[str, ...] = (
+        tuple(module_names) if solvers is None else tuple(dict.fromkeys(solvers))
+    )
 
     for solver_name in selected_names:
         if solver_name not in module_names:
