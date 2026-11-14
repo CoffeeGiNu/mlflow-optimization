@@ -70,6 +70,26 @@ def test_termination_and_solution_validation(
     }
 
 
+@pytest.mark.parametrize("has_solution", (True, False, None))
+def test_optimal_termination_without_objective_becomes_feasible_without_warning(
+    has_solution: bool | None,
+) -> None:
+    reported: ReportedOutcome = ReportedOutcome(
+        raw_status="optimal",
+        termination=Termination.OPTIMAL,
+        has_solution=has_solution,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", MlflowOptimizationWarning)
+        outcome: SolveOutcome = classify_outcome(
+            reported, None, has_objective=False
+        )
+
+    assert outcome.termination is Termination.FEASIBLE
+    assert outcome.has_solution is has_solution
+    assert outcome.raw_status == "optimal"
+
+
 @pytest.mark.parametrize(
     ("reported", "error", "expected_termination", "expected_has_solution"),
     (
@@ -214,7 +234,7 @@ def test_non_finite_common_and_native_metrics_are_not_recorded() -> None:
         native={"branches": math.inf},
     )
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore", MlflowOptimizationWarning)
+        warnings.simplefilter("error", MlflowOptimizationWarning)
         normalized: NormalizedMetrics = normalize_metrics(
             reported,
             api="fake",
@@ -361,6 +381,10 @@ def test_native_metrics_are_namespaced_and_optional(include_native: bool) -> Non
         ),
         (SolverParameter("password", "secret-value"), None),
         (SolverParameter("api_token", "secret-value"), None),
+        (SolverParameter("apikey", "secret-value"), None),
+        (SolverParameter("accesskey", "secret-value"), None),
+        (SolverParameter("secretkey", "secret-value"), None),
+        (SolverParameter("ApiKey", "secret-value"), None),
         (SolverParameter("license_key", "license-value"), None),
         (SolverParameter("username", "solver-user"), None),
         (SolverParameter("log_directory", "/tmp/solver-logs"), None),
