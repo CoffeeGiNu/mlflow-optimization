@@ -36,7 +36,7 @@ _STATUS_TERMINATIONS: dict[int, tuple[str, Termination]] = {
 }
 
 
-class Integration(SolverIntegration):
+class GurobiAdapter(SolverIntegration):
     """The Gurobi solver integration."""
 
     api: str = "gurobipy"

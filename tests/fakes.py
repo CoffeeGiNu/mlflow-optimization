@@ -49,7 +49,7 @@ class FakeSolver:
         return self.status
 
 
-class Integration:
+class FakeSolverAdapter:
     """The adapter for the fake solver API."""
 
     api: str = "fake"

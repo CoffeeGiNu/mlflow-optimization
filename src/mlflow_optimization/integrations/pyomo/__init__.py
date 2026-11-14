@@ -1,5 +1,5 @@
 """Pyomo solver integration."""
 
-from .adapter import Integration
+from .adapter import PyomoAdapter
 
-__all__ = ["Integration"]
+__all__ = ["PyomoAdapter"]

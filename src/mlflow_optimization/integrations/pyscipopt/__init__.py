@@ -1,5 +1,5 @@
 """The PySCIPOpt solver integration package."""
 
-from .adapter import Integration
+from .adapter import PyScipOptAdapter
 
-__all__ = ["Integration"]
+__all__ = ["PyScipOptAdapter"]

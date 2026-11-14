@@ -1,5 +1,5 @@
 """Gurobi solver integration."""
 
-from .adapter import Integration
+from .adapter import GurobiAdapter
 
-__all__ = ("Integration",)
+__all__ = ("GurobiAdapter",)

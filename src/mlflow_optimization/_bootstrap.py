@@ -15,9 +15,13 @@ if TYPE_CHECKING:
     from mlflow_optimization.integrations.mlflow.artifacts import MlflowArtifactStore
     from mlflow_optimization.integrations.mlflow.runs import MlflowRunStore
 
-INTEGRATION_MODULES: dict[str, str] = {
-    integration_api: f"mlflow_optimization.integrations.{integration_api}.adapter"
-    for integration_api in ("gurobipy", "pyscipopt", "pyomo", "mathopt", "cp_sat", "routing")
+INTEGRATION_MODULES: dict[str, tuple[str, str]] = {
+    "gurobipy": ("mlflow_optimization.integrations.gurobipy.adapter", "GurobiAdapter"),
+    "pyscipopt": ("mlflow_optimization.integrations.pyscipopt.adapter", "PyScipOptAdapter"),
+    "pyomo": ("mlflow_optimization.integrations.pyomo.adapter", "PyomoAdapter"),
+    "mathopt": ("mlflow_optimization.integrations.mathopt.adapter", "MathOptAdapter"),
+    "cp_sat": ("mlflow_optimization.integrations.cp_sat.adapter", "CpSatAdapter"),
+    "routing": ("mlflow_optimization.integrations.routing.adapter", "RoutingAdapter"),
 }
 
 _record_solve: RecordSolve | None = None
@@ -75,7 +79,7 @@ def configure(
 
 def _resolve_integrations(solvers: Iterable[str] | None) -> list[SolverIntegration]:
     """The selected solver integrations."""
-    module_names: dict[str, str] = dict(INTEGRATION_MODULES)
+    module_names: dict[str, tuple[str, str]] = dict(INTEGRATION_MODULES)
     selected_names: tuple[str, ...] = (
         tuple(module_names) if solvers is None else tuple(dict.fromkeys(solvers))
     )
@@ -87,10 +91,12 @@ def _resolve_integrations(solvers: Iterable[str] | None) -> list[SolverIntegrati
 
     integrations: list[SolverIntegration] = []
     for solver_name in selected_names:
-        module_name: str = module_names[solver_name]
+        module_name: str
+        class_name: str
+        module_name, class_name = module_names[solver_name]
         try:
             integration_module: ModuleType = import_module(module_name)
-            integration: SolverIntegration = integration_module.Integration()
+            integration: SolverIntegration = getattr(integration_module, class_name)()
         except ImportError:
             if solvers is not None:
                 raise

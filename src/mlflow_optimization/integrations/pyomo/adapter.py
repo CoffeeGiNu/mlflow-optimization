@@ -49,7 +49,7 @@ PARAMETER_CONTROL_NAMES: frozenset[str] = frozenset(
 )
 
 
-class Integration:
+class PyomoAdapter:
     """The adapter for solve calls made through Pyomo."""
 
     api: str = "pyomo"

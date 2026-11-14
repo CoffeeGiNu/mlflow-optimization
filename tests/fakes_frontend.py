@@ -26,7 +26,7 @@ class FakeFrontend:
         return self.solver.solve()
 
 
-class Integration:
+class FakeFrontendAdapter:
     """The adapter for the fake modeling-layer API."""
 
     api: str = "fake_frontend"

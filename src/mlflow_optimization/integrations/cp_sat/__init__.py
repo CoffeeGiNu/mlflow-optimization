@@ -1,5 +1,5 @@
 """OR-Tools CP-SAT integration."""
 
-from .adapter import Integration
+from .adapter import CpSatAdapter
 
-__all__ = ["Integration"]
+__all__ = ["CpSatAdapter"]

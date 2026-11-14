@@ -1,5 +1,5 @@
 """The OR-Tools Routing integration."""
 
-from .adapter import Integration
+from .adapter import RoutingAdapter
 
-__all__ = ["Integration"]
+__all__ = ["RoutingAdapter"]

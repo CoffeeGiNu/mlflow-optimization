@@ -41,7 +41,7 @@ _SDK_EXCEPTION: type[Exception] = Exception
 _UNAVAILABLE: object = object()
 
 
-class Integration:
+class MathOptAdapter:
     """The MathOpt integration hook."""
 
     api: str = "mathopt"

@@ -135,7 +135,7 @@ def _explicit_parameters(
     return parameters
 
 
-class Integration(SolverIntegration):
+class RoutingAdapter(SolverIntegration):
     """The OR-Tools Routing solver integration."""
 
     api: str = "routing"

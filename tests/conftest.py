@@ -48,7 +48,7 @@ def tracking(tmp_path: Path) -> Iterator[Tracking]:
     previous_file_store_environment: str | None = os.environ.get("MLFLOW_ALLOW_FILE_STORE")
     previous_fake_module: ModuleType | None = sys.modules.get("fakes")
     previous_fake_frontend_module: ModuleType | None = sys.modules.get("fakes_frontend")
-    original_integration_modules: dict[str, str] = _bootstrap.INTEGRATION_MODULES.copy()
+    original_integration_modules: dict[str, tuple[str, str]] = _bootstrap.INTEGRATION_MODULES.copy()
     tests_directory: str = str(Path(__file__).parent)
     added_tests_directory: bool = tests_directory not in sys.path
     if added_tests_directory:
@@ -64,8 +64,8 @@ def tracking(tmp_path: Path) -> Iterator[Tracking]:
             experiment_name="optimization-tests"
         )
         client: MlflowClient = MlflowClient(tracking_uri=tracking_uri)
-        _bootstrap.INTEGRATION_MODULES["fake"] = "fakes"
-        _bootstrap.INTEGRATION_MODULES["fake_frontend"] = "fakes_frontend"
+        _bootstrap.INTEGRATION_MODULES["fake"] = ("fakes", "FakeSolverAdapter")
+        _bootstrap.INTEGRATION_MODULES["fake_frontend"] = ("fakes_frontend", "FakeFrontendAdapter")
         yield Tracking(client=client, experiment_id=experiment.experiment_id)
     finally:
         try:

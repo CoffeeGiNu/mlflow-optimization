@@ -51,7 +51,7 @@ _STATUS_TERMINATIONS: dict[str, Termination] = {
 }
 
 
-class Integration:
+class PyScipOptAdapter:
     """The PySCIPOpt solver integration."""
 
     api: str = "pyscipopt"
@@ -74,7 +74,7 @@ class Integration:
             return
 
         original_model: type[Any] = pyscipopt.Model
-        integration: Integration = self
+        integration: PyScipOptAdapter = self
         default_parameters: dict[str, bool | int | float | str] | None = (
             _read_default_parameters(original_model)
         )
@@ -132,7 +132,7 @@ class Integration:
 
 def _wrap_solve_entry_point(
     original_entry_point: Callable[..., Any],
-    integration: Integration,
+    integration: PyScipOptAdapter,
     default_parameters: dict[str, bool | int | float | str] | None,
 ) -> Callable[..., Any]:
     """An observed wrapper for one original PySCIPOpt solve entry point."""

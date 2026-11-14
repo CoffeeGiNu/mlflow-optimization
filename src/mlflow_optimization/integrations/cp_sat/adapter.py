@@ -27,7 +27,7 @@ from mlflow_optimization.features.metrics.types import (
 from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
 
 
-class Integration:
+class CpSatAdapter:
     """The OR-Tools CP-SAT integration."""
 
     api: str = "cp_sat"
