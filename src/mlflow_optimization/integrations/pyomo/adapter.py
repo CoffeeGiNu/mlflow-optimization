@@ -1021,10 +1021,20 @@ class Integration:
         solve_keywords: Mapping[str, Any],
     ) -> tuple[SolverParameter, ...]:
         values: dict[str, int | float | str | bool] = {}
+        # NOTE: Gurobi string parameters can contain credentials, hosts, paths, or job labels.
+        include_string_values: bool = self._engine(solver) != "gurobi"
         options: Any | None = self._read(solver, "options")[0]
-        self._add_parameter_mapping(values, options)
+        self._add_parameter_mapping(
+            values,
+            options,
+            include_string_values=include_string_values,
+        )
         solver_options: Any | None = self._read(solver, "_solver_options")[0]
-        self._add_parameter_mapping(values, solver_options)
+        self._add_parameter_mapping(
+            values,
+            solver_options,
+            include_string_values=include_string_values,
+        )
         configuration: Any | None = self._read(solver, "config")[0]
         configuration_template: Any | None = self._read(type(solver), "CONFIG")[0]
         if configuration_template is None and configuration is not None:
@@ -1045,10 +1055,20 @@ class Integration:
             configuration_values,
             PARAMETER_CONTROL_NAMES,
             configuration_template,
+            include_string_values,
         )
         for keyword_name in ("options", "solver_options"):
-            self._add_parameter_mapping(values, solve_keywords.get(keyword_name))
-        self._add_parameter_mapping(values, solve_keywords, PARAMETER_CONTROL_NAMES)
+            self._add_parameter_mapping(
+                values,
+                solve_keywords.get(keyword_name),
+                include_string_values=include_string_values,
+            )
+        self._add_parameter_mapping(
+            values,
+            solve_keywords,
+            PARAMETER_CONTROL_NAMES,
+            include_string_values=include_string_values,
+        )
         return tuple(
             SolverParameter(name, value, ParameterOrigin.EXPLICIT)
             for name, value in sorted(values.items())
@@ -1060,6 +1080,7 @@ class Integration:
         values: Any | None,
         excluded_names: frozenset[str] = frozenset(),
         configuration_template: Any | None = None,
+        include_string_values: bool = True,
     ) -> None:
         if isinstance(values, Mapping):
             parameter_items: Any = values.items()
@@ -1109,6 +1130,7 @@ class Integration:
                     continue
             if (
                 isinstance(value, (int, float, str, bool))
+                and (include_string_values or not isinstance(value, str))
                 and name is not None
                 and str(name) not in excluded_names
             ):
