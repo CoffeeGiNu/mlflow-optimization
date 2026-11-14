@@ -8,7 +8,7 @@ import gurobipy
 
 from mlflow_optimization.common.patching import Patch
 from mlflow_optimization.features.autolog.models import SolveObservation
-from mlflow_optimization.features.autolog.ports import SolveObserver, SolverIntegration
+from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver, SolverIntegration
 from mlflow_optimization.features.metadata.models import ParameterOrigin, ReportedMetadata, SolverParameter
 from mlflow_optimization.features.metrics.models import MissingReason, ObjectiveSense, ReportedMetrics
 from mlflow_optimization.features.outcomes.models import ReportedOutcome, Termination
@@ -49,7 +49,11 @@ class Integration(SolverIntegration):
                     return original(model, *arguments, **keyword_arguments)
 
                 def extract(result: Any | None, error: BaseException | None) -> SolveObservation:
-                    return _extract(model, error)
+                    gurobi_error: AttributeError | gurobipy.GurobiError
+                    try:
+                        return _extract(model, error)
+                    except (AttributeError, gurobipy.GurobiError) as gurobi_error:
+                        raise ObservationError("Could not build a Gurobi solve observation.") from gurobi_error
 
                 return observer.observe(self.api, call, extract)
 
@@ -139,7 +143,7 @@ def _extract(model: gurobipy.Model, error: BaseException | None) -> SolveObserva
 def _read_attribute(model: gurobipy.Model, attribute_name: str) -> tuple[bool, Any]:
     try:
         value: Any = getattr(model, attribute_name)
-    except Exception:
+    except (AttributeError, gurobipy.GurobiError):
         return False, None
     return True, value
 
@@ -232,25 +236,28 @@ def _read_parameters(model: gurobipy.Model) -> tuple[SolverParameter, ...]:
     parameter_names: list[str] = []
     parameter_name: str
     try:
-        for parameter_name in dir(parameter_set):
-            if parameter_name and parameter_name[0].isupper():
-                parameter_names.append(parameter_name)
-    except Exception:
+        available_parameter_names: list[str] = dir(parameter_set)
+    except (AttributeError, gurobipy.GurobiError):
         return ()
+    for parameter_name in available_parameter_names:
+        if parameter_name and parameter_name[0].isupper():
+            parameter_names.append(parameter_name)
     parameters: list[SolverParameter] = []
     for parameter_name in parameter_names:
         try:
-            parameter_info: tuple[Any, ...] = model.getParamInfo(parameter_name)
-        except Exception:
+            parameter_info: Any = model.getParamInfo(parameter_name)
+        except (AttributeError, gurobipy.GurobiError):
             continue
         try:
-            current_value: int | float | str | bool | None = _plain_parameter_value(parameter_info[2])
-        except Exception:
+            current_parameter_value: Any = parameter_info[2]
+        except (IndexError, TypeError):
             continue
         try:
-            default_value: int | float | str | bool | None = _plain_parameter_value(parameter_info[5])
-        except Exception:
+            default_parameter_value: Any = parameter_info[5]
+        except (IndexError, TypeError):
             continue
+        current_value: int | float | str | bool | None = _plain_parameter_value(current_parameter_value)
+        default_value: int | float | str | bool | None = _plain_parameter_value(default_parameter_value)
         if current_value is None or default_value is None or current_value == default_value:
             continue
         parameters.append(
@@ -272,19 +279,29 @@ def _plain_parameter_value(value: Any) -> int | float | str | bool | None:
 
 
 def _read_api_version() -> str | None:
-    try:
-        return str(gurobipy.__version__)
-    except Exception:
-        return None
+    version_value: Any = getattr(gurobipy, "__version__", None)
+    if isinstance(version_value, str):
+        return version_value
+    return None
 
 
 def _read_solver_version() -> str | None:
+    solver_module: Any = getattr(gurobipy, "gurobi", None)
+    if solver_module is None:
+        return None
+    version_function: Any = getattr(solver_module, "version", None)
+    if not callable(version_function):
+        return None
     try:
-        version: tuple[int, ...] = gurobipy.gurobi.version()
-    except Exception:
+        version: Any = version_function()
+    except (AttributeError, gurobipy.GurobiError):
+        return None
+    if not isinstance(version, tuple):
         return None
     version_parts: list[str] = []
-    version_part: int
+    version_part: Any
     for version_part in version:
+        if not isinstance(version_part, int):
+            return None
         version_parts.append(str(version_part))
     return ".".join(version_parts)
