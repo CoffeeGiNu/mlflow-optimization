@@ -22,6 +22,60 @@ DISTANCE_MATRIX: tuple[tuple[int, ...], ...] = (
 
 
 @pytest.mark.parametrize(
+    ("scenario", "termination"),
+    (("invalid", "error"), ("infeasible", "infeasible")),
+)
+def test_routing_unsuccessful_statuses(
+    tracking: Tracking, scenario: str, termination: str
+) -> None:
+    autolog(solvers=["routing"])
+    manager: pywrapcp.RoutingIndexManager = pywrapcp.RoutingIndexManager(4, 1, 0)
+    model: pywrapcp.RoutingModel = pywrapcp.RoutingModel(manager)
+    parameters: routing_parameters_pb2.RoutingSearchParameters = (
+        pywrapcp.DefaultRoutingSearchParameters()
+    )
+    if scenario == "invalid":
+        parameters.solution_limit = -1
+    else:
+        model.solver().Add(model.NextVar(model.Start(0)) == model.Start(0))
+
+    assignment: pywrapcp.Assignment | None = model.SolveWithParameters(parameters)
+
+    assert assignment is None
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 1
+    assert runs[0].data.tags["optimization.termination"] == termination
+    assert runs[0].data.tags["optimization.has_solution"] == "false"
+    assert "objective_value" not in runs[0].data.metrics
+
+
+def test_repeated_routing_solves_record_counter_deltas(tracking: Tracking) -> None:
+    autolog(solvers=["routing"])
+    manager: pywrapcp.RoutingIndexManager = pywrapcp.RoutingIndexManager(4, 1, 0)
+    model: pywrapcp.RoutingModel = pywrapcp.RoutingModel(manager)
+    parameters: routing_parameters_pb2.RoutingSearchParameters = (
+        pywrapcp.DefaultRoutingSearchParameters()
+    )
+    snapshots: list[tuple[int, int]] = []
+    snapshots.append((model.solver().Branches(), model.solver().Failures()))
+    for solve_index in range(2):
+        assignment: pywrapcp.Assignment | None = model.SolveWithParameters(parameters)
+        assert assignment is not None
+        snapshots.append((model.solver().Branches(), model.solver().Failures()))
+
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 2
+    for solve_index, run in enumerate(runs):
+        assert run.data.metrics["routing.branches"] == (
+            snapshots[solve_index + 1][0] - snapshots[solve_index][0]
+        )
+        assert run.data.metrics["routing.failures"] == (
+            snapshots[solve_index + 1][1] - snapshots[solve_index][1]
+        )
+    assert snapshots[2][0] > snapshots[1][0] > snapshots[0][0]
+
+
+@pytest.mark.parametrize(
     "vehicle_count",
     (1, 2),
     ids=("tsp", "vrp"),
@@ -67,11 +121,8 @@ def test_routing_solve_records_meaningful_results(
         "absolute_gap",
         "relative_gap",
     )
-    metric_name: str
     for metric_name in missing_metrics:
-        assert (
-            tags[f"optimization.missing.{metric_name}"] == "unsupported"
-        )
+        assert tags[f"optimization.missing.{metric_name}"] == "unsupported"
     assert run.data.params["problem.num_locations"] == str(len(DISTANCE_MATRIX))
     assert run.data.params["problem.num_vehicles"] == str(vehicle_count)
     assert tracking.client.list_artifacts(run.info.run_id) == []
@@ -80,7 +131,6 @@ def test_routing_solve_records_meaningful_results(
         *run.data.params.keys(),
         *run.data.metrics.keys(),
     )
-    recorded_key: str
     for recorded_key in recorded_keys:
         assert "route" not in recorded_key.casefold()
 
@@ -113,15 +163,14 @@ def test_requested_route_artifact_is_attached_only_to_its_solve(
     assert tracking.client.list_artifacts(first_run.info.run_id) == []
     artifacts: list[FileInfo] = tracking.client.list_artifacts(second_run.info.run_id)
     artifact_paths: list[str] = []
-    artifact: FileInfo
     for artifact in artifacts:
         artifact_paths.append(artifact.path)
     assert artifact_paths == ["route.txt"]
 
 
 def _solve_routing_problem(vehicle_count: int) -> pywrapcp.Assignment | None:
-    routing_index_manager: pywrapcp.RoutingIndexManager = (
-        pywrapcp.RoutingIndexManager(len(DISTANCE_MATRIX), vehicle_count, 0)
+    routing_index_manager: pywrapcp.RoutingIndexManager = pywrapcp.RoutingIndexManager(
+        len(DISTANCE_MATRIX), vehicle_count, 0
     )
     routing_model: pywrapcp.RoutingModel = pywrapcp.RoutingModel(routing_index_manager)
 
