@@ -26,6 +26,7 @@ INTEGRATION_MODULES: dict[str, tuple[str, str]] = {
 
 _record_solve: RecordSolve | None = None
 _autolog_manager: AutologManager | None = None
+_integration_cache: dict[type[SolverIntegration], SolverIntegration] = {}
 
 
 def configure(
@@ -53,11 +54,13 @@ def configure(
 
         run_store: MlflowRunStore = MlflowRunStore()
         artifact_store: MlflowArtifactStore = MlflowArtifactStore()
-        record_options: RecordOptions = RecordOptions(
-            log_solver_parameters=log_solver_parameters,
-            log_solver_metrics=log_solver_metrics,
-            log_artifacts=log_artifacts,
-        )
+        record_options: RecordOptions = RecordOptions()
+        if not disable:
+            record_options = RecordOptions(
+                log_solver_parameters=log_solver_parameters,
+                log_solver_metrics=log_solver_metrics,
+                log_artifacts=log_artifacts,
+            )
         record_solve: RecordSolve = RecordSolve(run_store, artifact_store, record_options)
         autolog_manager: AutologManager = AutologManager(record_solve)
 
@@ -65,9 +68,10 @@ def configure(
         _autolog_manager = autolog_manager
     else:
         assert _record_solve is not None
-        _record_solve.options.log_solver_parameters = log_solver_parameters
-        _record_solve.options.log_solver_metrics = log_solver_metrics
-        _record_solve.options.log_artifacts = log_artifacts
+        if not disable:
+            _record_solve.options.log_solver_parameters = log_solver_parameters
+            _record_solve.options.log_solver_metrics = log_solver_metrics
+            _record_solve.options.log_artifacts = log_artifacts
 
     assert _autolog_manager is not None
     if disable:
@@ -96,7 +100,17 @@ def _resolve_integrations(solvers: Iterable[str] | None) -> list[SolverIntegrati
         module_name, class_name = module_names[solver_name]
         try:
             integration_module: ModuleType = import_module(module_name)
-            integration: SolverIntegration = getattr(integration_module, class_name)()
+            integration_class: type[SolverIntegration] = getattr(
+                integration_module, class_name
+            )
+            cached_integration: SolverIntegration | None = _integration_cache.get(
+                integration_class
+            )
+            if cached_integration is not None:
+                integration: SolverIntegration = cached_integration
+            else:
+                integration = integration_class()
+                _integration_cache[integration_class] = integration
         except ImportError:
             if solvers is not None:
                 raise

@@ -28,6 +28,7 @@ class FakeSolver:
         parameters: dict[str, int | float | str | bool] | None = None,
         statistics: dict[str, float] | None = None,
         raises: BaseException | None = None,
+        during_solve: Callable[[], None] | None = None,
     ) -> None:
         self.status: str | Termination = status
         self.has_solution: bool = has_solution
@@ -39,9 +40,12 @@ class FakeSolver:
         )
         self.statistics: dict[str, float] = statistics.copy() if statistics is not None else {}
         self.raises: BaseException | None = raises
+        self.during_solve: Callable[[], None] | None = during_solve
 
     def solve(self) -> str:
         """The configured solver termination status."""
+        if self.during_solve is not None:
+            self.during_solve()
         if self.raises is not None:
             raise self.raises
         if isinstance(self.status, Termination):

@@ -1,6 +1,7 @@
 import warnings
 from collections.abc import Callable
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 from mlflow.entities import FileInfo, Run
@@ -15,6 +16,7 @@ from mlflow_optimization import (
     context,
     last_solve,
 )
+from mlflow_optimization.features.autolog.ports import SolveObserver
 
 
 def test_disabling_autolog_restores_solver_callables_without_writes(
@@ -35,6 +37,113 @@ def test_disabling_autolog_restores_solver_callables_without_writes(
 
     assert result == "optimal"
     assert tracking.solve_runs() == []
+
+
+def test_repeated_autolog_keeps_selected_adapter_installed(
+    tracking: Tracking,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fakes import FakeSolver, FakeSolverAdapter
+
+    installed_adapters: list[FakeSolverAdapter] = []
+    uninstalled_adapters: list[FakeSolverAdapter] = []
+    original_install: Callable[[FakeSolverAdapter, SolveObserver], None] = (
+        FakeSolverAdapter.install
+    )
+    original_uninstall: Callable[[FakeSolverAdapter], None] = (
+        FakeSolverAdapter.uninstall
+    )
+
+    def track_install(
+        adapter: FakeSolverAdapter,
+        observer: SolveObserver,
+    ) -> None:
+        installed_adapters.append(adapter)
+        original_install(adapter, observer)
+
+    def track_uninstall(adapter: FakeSolverAdapter) -> None:
+        uninstalled_adapters.append(adapter)
+        original_uninstall(adapter)
+
+    monkeypatch.setattr(FakeSolverAdapter, "install", track_install)
+    monkeypatch.setattr(FakeSolverAdapter, "uninstall", track_uninstall)
+
+    autolog(solvers=["fake"])
+    solver: FakeSolver = FakeSolver()
+    solver.solve()
+    autolog(solvers=["fake"])
+    solver.solve()
+
+    assert len(installed_adapters) == 1
+    assert uninstalled_adapters == []
+
+    autolog(solvers=[])
+    autolog(solvers=["fake"])
+    solver.solve()
+
+    assert len(installed_adapters) == 2
+    assert installed_adapters[0] is installed_adapters[1]
+    assert len(uninstalled_adapters) == 1
+    assert uninstalled_adapters[0] is installed_adapters[0]
+    assert len(tracking.solve_runs()) == 3
+
+
+def test_disabling_autolog_preserves_recording_options(
+    tracking: Tracking,
+    tmp_path: Path,
+) -> None:
+    from fakes import FakeSolver
+
+    autolog(
+        solvers=["fake"],
+        log_solver_parameters=False,
+        log_artifacts=False,
+    )
+    first_solver: FakeSolver = FakeSolver()
+    first_solver.solve()
+    first_solve: SolveRun | None = last_solve()
+    assert first_solve is not None
+
+    solve_started: Event = Event()
+    finish_solve: Event = Event()
+
+    def hold_solve() -> None:
+        solve_started.set()
+        if not finish_solve.wait(timeout=10):
+            raise TimeoutError("The test did not release the solve.")
+
+    solver: FakeSolver = FakeSolver(
+        parameters={"TimeLimit": 5},
+        during_solve=hold_solve,
+    )
+    solve_errors: list[Exception] = []
+
+    def solve_on_thread() -> None:
+        try:
+            solver.solve()
+        except Exception as error:
+            solve_errors.append(error)
+
+    solve_thread: Thread = Thread(target=solve_on_thread, daemon=True)
+    solve_thread.start()
+    try:
+        assert solve_started.wait(timeout=10)
+        autolog(disable=True)
+    finally:
+        finish_solve.set()
+    solve_thread.join(timeout=10)
+
+    assert not solve_thread.is_alive()
+    assert solve_errors == []
+    solve_runs: list[Run] = tracking.solve_runs()
+    assert len(solve_runs) == 2
+    assert solve_runs[1].data.params == {}
+
+    artifact_path: Path = tmp_path / "route.txt"
+    artifact_path.write_text("selected route", encoding="utf-8")
+    with pytest.warns(MlflowOptimizationWarning):
+        first_solve.log_artifact(str(artifact_path))
+    assert tracking.client.list_artifacts(first_solve.run_id) == []
 
 
 def test_unusable_tracking_store_does_not_change_solve_result_or_hide_warning(
