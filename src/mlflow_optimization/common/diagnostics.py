@@ -5,7 +5,7 @@ import warnings
 
 
 class MlflowOptimizationWarning(UserWarning):
-    """Notification that observing, validating or recording a solve failed."""
+    """The category of every warning emitted by this library."""
 
 
 def warn(message: str, *, stacklevel: int = 2) -> None:

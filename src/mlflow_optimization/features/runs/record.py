@@ -64,7 +64,19 @@ class SolveRun:
         unit: str | None = None,
         description: str | None = None,
     ) -> None:
-        """Add a user metric to this solve."""
+        """Add a user metric to this solve.
+
+        Parameters
+        ----------
+        name : str
+            User metric name; its recorded key is prefixed with ``user.``.
+        value : float
+            Metric value.
+        unit : str, optional
+            Unit tag stored as ``user.{name}.unit``.
+        description : str, optional
+            Description tag stored as ``user.{name}.description``.
+        """
         try:
             entry: UserMetric | None = user_metric(
                 name, value, unit=unit, description=description
@@ -77,7 +89,14 @@ class SolveRun:
             warn(f"Could not log metric: {error}")
 
     def set_tags(self, tags: Mapping[str, str]) -> None:
-        """Add user tags to this solve."""
+        """Add user tags to this solve.
+
+        Parameters
+        ----------
+        tags : Mapping[str, str]
+            Tags to add; keys beginning with ``optimization.`` or ``mlflow.``
+            are ignored.
+        """
         try:
             accepted: dict[str, str] = user_tags(tags)
             if accepted:
@@ -86,7 +105,16 @@ class SolveRun:
             warn(f"Could not set tags: {error}")
 
     def log_artifact(self, local_path: str, artifact_path: str | None = None) -> None:
-        """Attach a local file to this solve."""
+        """Attach a local file to this solve.
+
+        Parameters
+        ----------
+        local_path : str
+            Path to an existing local file.
+        artifact_path : str, optional
+            Destination directory in run artifacts; if omitted, the file goes
+            to the artifact root.
+        """
         try:
             refusal: str | None = artifact_refusal(
                 local_path, enabled=self._options.log_artifacts
@@ -180,5 +208,11 @@ class RecordSolve:
 
 
 def last_solve() -> SolveRun | None:
-    """The most recent solve recorded in the current thread or async context."""
+    """The most recent solve recorded in the current thread or async context.
+
+    Returns
+    -------
+    SolveRun or None
+        None until a solve is recorded in the current context.
+    """
     return _last_solve.get()

@@ -22,7 +22,18 @@ def context(
     description: str | None = None,
     tags: Mapping[str, str] | None = None,
 ) -> Iterator[None]:
-    """A scope whose annotations apply to every solve started inside it."""
+    """A scope whose annotations apply to every solve started inside it.
+
+    Parameters
+    ----------
+    instance : str, optional
+        Instance name; inherited from the enclosing scope when omitted.
+    description : str, optional
+        Description; inherited from the enclosing scope when omitted.
+    tags : Mapping[str, str], optional
+        User tags merge with enclosing tags; inner values replace outer values for
+        matching keys. Keys prefixed ``optimization.`` or ``mlflow.`` are ignored.
+    """
     enclosing_annotation: Annotation = current_annotation()
     merged_tags: dict[str, str] = dict(enclosing_annotation.tags)
     if tags is not None:
