@@ -10,6 +10,7 @@ from typing import Any
 
 import pyscipopt
 import pyscipopt.scip
+from mlflow_optimization.common.patching import receiver_of
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
 from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.metadata.types import (
@@ -182,13 +183,13 @@ def _wrap_solve_entry_point(
 
     @wraps(original_entry_point)
     def observed_entry_point(
-        model: Any,
-        *arguments: Any,
-        **keyword_arguments: Any,
+        *args: Any,
+        **kwargs: Any,
     ) -> Any:
-        original_signature.bind(model, *arguments, **keyword_arguments)
+        original_signature.bind(*args, **kwargs)
+        model: Any = receiver_of(original_entry_point, args, kwargs)
         if not integration._installed or integration._observer is None:
-            return original_entry_point(model, *arguments, **keyword_arguments)
+            return original_entry_point(*args, **kwargs)
 
         # NOTE: SCIP changes parameters while solving, so capture configured values first.
         parameters_before_solve: tuple[SolverParameter, ...] = _read_parameters(
@@ -197,7 +198,7 @@ def _wrap_solve_entry_point(
         )
 
         def call() -> Any:
-            return original_entry_point(model, *arguments, **keyword_arguments)
+            return original_entry_point(*args, **kwargs)
 
         def extract(
             result: Any | None, error: BaseException | None
