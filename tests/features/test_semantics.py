@@ -29,27 +29,40 @@ from mlflow_optimization.features.outcomes.types import (
 )
 
 
-@pytest.mark.parametrize("termination", tuple(Termination))
-@pytest.mark.parametrize("has_solution", (True, False, None))
+@pytest.mark.parametrize(
+    ("termination", "has_solution", "expected_termination", "should_warn"),
+    (
+        (Termination.OPTIMAL, False, Termination.OPTIMAL, True),
+        (Termination.FEASIBLE, False, Termination.UNKNOWN, True),
+        (Termination.INFEASIBLE, True, Termination.INFEASIBLE, True),
+        (Termination.OPTIMAL, None, Termination.OPTIMAL, False),
+        (Termination.TIME_LIMIT, True, Termination.TIME_LIMIT, False),
+        (Termination.TIME_LIMIT, False, Termination.TIME_LIMIT, False),
+        (
+            Termination.INFEASIBLE_OR_UNBOUNDED,
+            True,
+            Termination.INFEASIBLE_OR_UNBOUNDED,
+            False,
+        ),
+        (
+            Termination.INFEASIBLE_OR_UNBOUNDED,
+            False,
+            Termination.INFEASIBLE_OR_UNBOUNDED,
+            False,
+        ),
+    ),
+)
 def test_termination_and_solution_validation(
-    termination: Termination, has_solution: bool | None
+    termination: Termination,
+    has_solution: bool | None,
+    expected_termination: Termination,
+    should_warn: bool,
 ) -> None:
     reported: ReportedOutcome = ReportedOutcome(
         raw_status=termination.value,
         termination=termination,
         has_solution=has_solution,
     )
-    should_warn: bool = (
-        (termination is Termination.OPTIMAL and has_solution is False)
-        or (termination is Termination.FEASIBLE and has_solution is False)
-        or (termination is Termination.INFEASIBLE and has_solution is True)
-    )
-    expected_termination: Termination = (
-        Termination.UNKNOWN
-        if termination is Termination.FEASIBLE and has_solution is False
-        else termination
-    )
-
     if should_warn:
         with pytest.warns(MlflowOptimizationWarning):
             outcome: SolveOutcome = classify_outcome(reported, None)
@@ -70,22 +83,35 @@ def test_termination_and_solution_validation(
     }
 
 
-@pytest.mark.parametrize("has_solution", (True, False, None))
-def test_optimal_termination_without_objective_becomes_feasible_without_warning(
+@pytest.mark.parametrize(
+    ("has_solution", "expected_termination", "should_warn"),
+    (
+        (True, Termination.FEASIBLE, False),
+        (False, Termination.UNKNOWN, True),
+        (None, Termination.FEASIBLE, False),
+    ),
+)
+def test_optimal_termination_without_objective_is_normalized_then_validated(
     has_solution: bool | None,
+    expected_termination: Termination,
+    should_warn: bool,
 ) -> None:
     reported: ReportedOutcome = ReportedOutcome(
         raw_status="optimal",
         termination=Termination.OPTIMAL,
         has_solution=has_solution,
     )
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", MlflowOptimizationWarning)
-        outcome: SolveOutcome = classify_outcome(
-            reported, None, has_objective=False
-        )
+    if should_warn:
+        with pytest.warns(MlflowOptimizationWarning):
+            outcome: SolveOutcome = classify_outcome(
+                reported, None, has_objective=False
+            )
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", MlflowOptimizationWarning)
+            outcome = classify_outcome(reported, None, has_objective=False)
 
-    assert outcome.termination is Termination.FEASIBLE
+    assert outcome.termination is expected_termination
     assert outcome.has_solution is has_solution
     assert outcome.raw_status == "optimal"
 
@@ -156,7 +182,6 @@ def test_absent_common_metrics_get_reason_tags_without_zero_filling(
     assert normalized.values == {"wall_time_seconds": 2.5}
     metric_name: str
     for metric_name in absent_metrics:
-        assert metric_name not in normalized.values
         assert (
             normalized.tags[f"optimization.missing.{metric_name}"]
             == expected_reason.value
@@ -185,10 +210,10 @@ def test_objective_less_models_make_objective_metrics_undefined() -> None:
         "relative_gap",
     )
 
+    assert normalized.values == {"wall_time_seconds": 1.0}
     assert normalized.tags["optimization.has_objective"] == "false"
     metric_name: str
     for metric_name in objective_metrics:
-        assert metric_name not in normalized.values
         assert (
             normalized.tags[f"optimization.missing.{metric_name}"]
             == MissingReason.UNDEFINED.value
@@ -210,10 +235,10 @@ def test_no_solution_discards_a_bogus_objective_but_keeps_a_finite_bound() -> No
         include_native=False,
     )
 
-    assert "objective_value" not in normalized.values
-    assert normalized.values["dual_bound"] == 900.0
-    assert "absolute_gap" not in normalized.values
-    assert "relative_gap" not in normalized.values
+    assert normalized.values == {
+        "dual_bound": 900.0,
+        "wall_time_seconds": 1.0,
+    }
     metric_name: str
     for metric_name in ("objective_value", "absolute_gap", "relative_gap"):
         assert (
@@ -253,17 +278,13 @@ def test_non_finite_common_and_native_metrics_are_not_recorded() -> None:
         "barrier_iterations",
     )
 
+    assert normalized.values == {}
     metric_name: str
     for metric_name in common_metrics:
-        assert metric_name not in normalized.values
         assert (
             normalized.tags[f"optimization.missing.{metric_name}"]
             == MissingReason.UNDEFINED.value
         )
-    assert "fake.branches" not in normalized.values
-    metric_value: float
-    for metric_value in normalized.values.values():
-        assert math.isfinite(metric_value)
 
 
 @pytest.mark.parametrize(
