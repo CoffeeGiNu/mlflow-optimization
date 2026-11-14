@@ -8,7 +8,7 @@ import ortools
 from ortools.sat import sat_parameters_pb2
 from ortools.sat.python import cp_model
 
-from mlflow_optimization.common.patching import Patch
+from mlflow_optimization.common.patching import Patch, receiver_of
 from mlflow_optimization.features.autolog.ports import (
     ObservationError,
     SolveObserver,
@@ -63,22 +63,20 @@ class Integration:
 
     def _wrap(self, original: Any) -> Callable[..., Any]:
         @wraps(original)
-        def wrapped(
-            solver: Any,
-            *positional_arguments: Any,
-            **keyword_arguments: Any,
-        ) -> Any:
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
             observer: SolveObserver | None = self._observer
             if observer is None:
-                return original(solver, *positional_arguments, **keyword_arguments)
-            model: Any | None = (
-                positional_arguments[0]
-                if positional_arguments
-                else keyword_arguments.get("model")
-            )
+                return original(*args, **kwargs)
+            try:
+                solver: Any = receiver_of(original, args, kwargs)
+            except KeyError:
+                return original(*args, **kwargs)
+            model: Any | None = kwargs.get("model")
+            if model is None and len(args) > 1:
+                model = args[1]
 
             def call() -> Any:
-                return original(solver, *positional_arguments, **keyword_arguments)
+                return original(*args, **kwargs)
 
             def extract(
                 result: Any | None,
@@ -223,7 +221,10 @@ class Integration:
             objective_value = MissingReason.UNDEFINED
             dual_bound = MissingReason.UNDEFINED
         else:
-            objective_value = self._read_objective_value(solver, outcome.has_solution)
+            objective_value = self._read_objective_value(
+                solver,
+                outcome.has_solution,
+            )
             dual_bound = self._read_dual_bound(solver, outcome)
         if call_failed:
             solver_time_seconds: float | MissingReason = MissingReason.FAILED
@@ -322,9 +323,19 @@ class Integration:
         solver: Any,
         outcome: ReportedOutcome,
     ) -> float | MissingReason:
-        if outcome.has_solution is not True:
+        if outcome.has_solution is True:
+            return self._read_response_metric(solver, "best_objective_bound")
+        if outcome.termination is not Termination.UNKNOWN:
             return MissingReason.UNDEFINED
-        return self._read_response_metric(solver, "best_objective_bound")
+        value: float | MissingReason = self._read_response_metric(
+            solver,
+            "best_objective_bound",
+        )
+        if isinstance(value, MissingReason):
+            return value
+        if value != 0.0:
+            return value
+        return MissingReason.UNDEFINED
 
     def _read_solver_time(self, solver: Any) -> float | MissingReason:
         return self._read_response_metric(solver, "wall_time")
