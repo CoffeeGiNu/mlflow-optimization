@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 
@@ -193,3 +194,22 @@ def test_solve_exception_propagates_and_marks_run_failed(tracking: Tracking) -> 
     assert solve_run.info.status == "FAILED"
     assert solve_run.data.tags["optimization.termination"] == "error"
     assert solve_run.data.tags["optimization.error"] == "RuntimeError: solver failed"
+
+
+def test_diagnostic_warning_as_error_does_not_change_or_suppress_solve(
+    tracking: Tracking,
+) -> None:
+    from fakes import FakeSolver
+
+    autolog(solvers=["fake"])
+    solver: FakeSolver = FakeSolver(status="optimal", has_solution=False)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", MlflowOptimizationWarning)
+        result: str = solver.solve()
+
+    assert result == "optimal"
+    solve_runs: list[Run] = tracking.solve_runs()
+    assert len(solve_runs) == 1
+    assert solve_runs[0].data.tags["optimization.termination"] == "optimal"
+    assert solve_runs[0].data.tags["optimization.has_solution"] == "false"
