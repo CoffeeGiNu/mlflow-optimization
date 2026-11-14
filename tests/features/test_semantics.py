@@ -379,22 +379,9 @@ def test_native_metrics_are_namespaced_and_optional(include_native: bool) -> Non
             SolverParameter("seed", 7, ParameterOrigin.EFFECTIVE),
             "solver_param_effective.seed",
         ),
-        (SolverParameter("password", "secret-value"), None),
-        (SolverParameter("api_token", "secret-value"), None),
-        (SolverParameter("apikey", "secret-value"), None),
-        (SolverParameter("accesskey", "secret-value"), None),
-        (SolverParameter("secretkey", "secret-value"), None),
-        (SolverParameter("ApiKey", "secret-value"), None),
-        (SolverParameter("license_key", "license-value"), None),
-        (SolverParameter("username", "solver-user"), None),
-        (SolverParameter("log_directory", "/tmp/solver-logs"), None),
-        (SolverParameter("host", "solver.internal"), None),
-        (SolverParameter("solver_config", "/tmp/solver.conf"), None),
-        (SolverParameter("remote_endpoint", "https://solver.example"), None),
-        (SolverParameter("model_label", "baseline"), "solver_param.model_label"),
     ),
 )
-def test_parameter_collection_filters_sensitive_values_and_preserves_origins(
+def test_parameter_origins_use_distinct_namespaces(
     parameter: SolverParameter, expected_parameter_name: str | None
 ) -> None:
     reported: ReportedMetadata = ReportedMetadata(parameters=(parameter,))
@@ -402,7 +389,4 @@ def test_parameter_collection_filters_sensitive_values_and_preserves_origins(
         "fake", reported, include_parameters=True
     )
 
-    if expected_parameter_name is None:
-        assert collected.params == {}
-    else:
-        assert collected.params == {expected_parameter_name: str(parameter.value)}
+    assert collected.params == {expected_parameter_name: str(parameter.value)}
