@@ -162,9 +162,7 @@ class RecordSolve:
         tags["optimization.solve_id"] = solve.solve_id
         tags["optimization.solve_index"] = str(solve.solve_index)
         if solve.error is not None:
-            tags["optimization.error"] = f"{type(solve.error).__name__}: {solve.error}"[
-                :5000
-            ]
+            tags["optimization.error"] = type(solve.error).__name__
         status: RunStatus = RunStatus.FINISHED
         if isinstance(solve.error, KeyboardInterrupt):
             status = RunStatus.KILLED
