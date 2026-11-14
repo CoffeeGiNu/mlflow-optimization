@@ -23,6 +23,7 @@ from mlflow_optimization.features.metrics.types import (
     ReportedMetrics,
 )
 from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
+from pyomo.opt.base.solvers import OptSolver
 
 PARAMETER_CONTROL_NAMES: frozenset[str] = frozenset(
     {
@@ -88,40 +89,63 @@ class Integration:
         """Installation of Pyomo solve hooks."""
         if self._patches:
             return
-        try:
-            from pyomo.contrib.appsi import solvers as appsi_solver_package
-            from pyomo.contrib.appsi.base import LegacySolverInterface, PersistentSolver
-            from pyomo.contrib.solver.common.base import LegacySolverWrapper, SolverBase
-            from pyomo.opt.base.solvers import OptSolver
-            from pyomo.solvers.plugins.solvers.direct_or_persistent_solver import (
-                DirectOrPersistentSolver,
-            )
-        except ImportError as error:
-            raise ImportError("The Pyomo integration requires Pyomo.") from error
         self._solver_exceptions = self._load_solver_exceptions()
-        appsi_solver_modules: tuple[str, ...] = tuple(
-            module_info.name
-            for module_info in pkgutil.iter_modules(
-                appsi_solver_package.__path__,
-                f"{appsi_solver_package.__name__}.",
-            )
-            if module_info.name.rsplit(".", 1)[-1] != "tests"
+        owner_modules: tuple[tuple[str, tuple[str, ...]], ...] = (
+            (
+                "pyomo.contrib.appsi.base",
+                ("LegacySolverInterface", "PersistentSolver"),
+            ),
+            (
+                "pyomo.contrib.solver.common.base",
+                ("LegacySolverWrapper", "SolverBase"),
+            ),
+            (
+                "pyomo.solvers.plugins.solvers.direct_or_persistent_solver",
+                ("DirectOrPersistentSolver",),
+            ),
         )
-        for appsi_solver_module in appsi_solver_modules:
+        owners: list[type[Any]] = [OptSolver]
+        for module_name, class_names in owner_modules:
             try:
-                importlib.import_module(appsi_solver_module)
-            except (ImportError, AttributeError):
+                owner_module: Any = importlib.import_module(module_name)
+            except ImportError:
+                continue
+            except NameError:
                 continue
             except self._solver_exceptions:
                 continue
-        owners: tuple[type[Any], ...] = (
-            OptSolver,
-            DirectOrPersistentSolver,
-            LegacySolverInterface,
-            PersistentSolver,
-            SolverBase,
-            LegacySolverWrapper,
-        )
+            for class_name in class_names:
+                owner_class: Any | None = getattr(owner_module, class_name, None)
+                if isinstance(owner_class, type):
+                    owners.append(owner_class)
+        try:
+            appsi_solver_package: Any = importlib.import_module(
+                "pyomo.contrib.appsi.solvers"
+            )
+        except ImportError:
+            appsi_solver_package = None
+        except NameError:
+            appsi_solver_package = None
+        except self._solver_exceptions:
+            appsi_solver_package = None
+        if appsi_solver_package is not None:
+            appsi_solver_modules: tuple[str, ...] = tuple(
+                module_info.name
+                for module_info in pkgutil.iter_modules(
+                    appsi_solver_package.__path__,
+                    f"{appsi_solver_package.__name__}.",
+                )
+                if module_info.name.rsplit(".", 1)[-1] != "tests"
+            )
+            for appsi_solver_module in appsi_solver_modules:
+                try:
+                    importlib.import_module(appsi_solver_module)
+                except (ImportError, AttributeError):
+                    continue
+                except NameError:
+                    continue
+                except self._solver_exceptions:
+                    continue
         specific_owners: list[type[Any]] = []
         optional_modules: tuple[tuple[str, str], ...] = (
             ("pyomo.solvers.plugins.solvers.gurobi_direct", "GurobiDirect"),
@@ -137,6 +161,8 @@ class Integration:
                 solver_module: Any = importlib.import_module(module_name)
                 solver_class: Any = getattr(solver_module, class_name)
             except (ImportError, AttributeError):
+                continue
+            except NameError:
                 continue
             except self._solver_exceptions:
                 continue
