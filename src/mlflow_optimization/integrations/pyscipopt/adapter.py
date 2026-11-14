@@ -1,16 +1,20 @@
 """The PySCIPOpt solver integration."""
 
 import math
-import sys
 from collections.abc import Callable
 from functools import wraps
 from inspect import Signature, signature
 from types import ModuleType
 from typing import Any
+from weakref import WeakKeyDictionary
 
 import pyscipopt
 import pyscipopt.scip
-from mlflow_optimization.common.patching import receiver_of
+from mlflow_optimization.common.patching import (
+    rebind_module_names,
+    receiver_of,
+    restore_module_names,
+)
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
 from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.metadata.types import (
@@ -24,29 +28,6 @@ from mlflow_optimization.features.metrics.types import (
     ReportedMetrics,
 )
 from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
-
-_PYSCIPOPT_READ_ERRORS: tuple[type[Exception], ...] = (
-    AttributeError,
-    MemoryError,
-    OverflowError,
-    RuntimeError,
-    TypeError,
-    ValueError,
-    Warning,
-)
-_OBJECTIVE_VALUE_ERRORS: tuple[type[Exception], ...] = (
-    *_PYSCIPOPT_READ_ERRORS,
-    AssertionError,
-)
-_OBSERVATION_BUILD_ERRORS: tuple[type[Exception], ...] = (
-    *_OBJECTIVE_VALUE_ERRORS,
-    LookupError,
-    OSError,
-)
-_PARAMETER_READ_ERRORS: tuple[type[Exception], ...] = (
-    *_PYSCIPOPT_READ_ERRORS,
-    LookupError,
-)
 
 _STATUS_TERMINATIONS: dict[str, Termination] = {
     "unknown": Termination.UNKNOWN,
@@ -81,6 +62,10 @@ class Integration:
         self._original_model: type[Any] | None = None
         self._logging_model: type[Any] | None = None
         self._rebound_names: list[tuple[ModuleType, str]] = []
+        self._counter_snapshots: WeakKeyDictionary[
+            Any,
+            tuple[int | MissingReason, dict[str, float | MissingReason]],
+        ] = WeakKeyDictionary()
 
     def install(self, observer: SolveObserver) -> None:
         """A patch that replaces model references with an observing subclass."""
@@ -102,7 +87,6 @@ class Integration:
             "optimizeNogil",
             "solveConcurrent",
         )
-        entry_point_name: str
         for entry_point_name in entry_point_names:
             original_entry_point: Any = getattr(original_model, entry_point_name, None)
             if not callable(original_entry_point):
@@ -115,23 +99,10 @@ class Integration:
             setattr(LoggingModel, entry_point_name, observed_entry_point)
 
         logging_model: type[Any] = LoggingModel
-        rebound_names: list[tuple[ModuleType, str]] = []
-        loaded_module_value: Any
-        loaded_module: ModuleType
-        attribute_name: str
-        attribute_value: Any
-        module_values: dict[str, Any]
-
-        for loaded_module_value in tuple(sys.modules.values()):
-            if not isinstance(loaded_module_value, ModuleType):
-                continue
-            loaded_module = loaded_module_value
-            module_values = vars(loaded_module)
-            for attribute_name, attribute_value in tuple(module_values.items()):
-                if attribute_value is not original_model:
-                    continue
-                module_values[attribute_name] = logging_model
-                rebound_names.append((loaded_module, attribute_name))
+        rebound_names: list[tuple[ModuleType, str]] = rebind_module_names(
+            original_model,
+            logging_model,
+        )
 
         self._observer = observer
         self._original_model = original_model
@@ -148,29 +119,15 @@ class Integration:
         assert self._logging_model is not None
         original_model: type[Any] = self._original_model
         logging_model: type[Any] = self._logging_model
-        loaded_module_value: Any
-        loaded_module: ModuleType
-        attribute_name: str
-        attribute_value: Any
-        module_values: dict[str, Any]
-
-        for loaded_module_value in tuple(sys.modules.values()):
-            if not isinstance(loaded_module_value, ModuleType):
-                continue
-            loaded_module = loaded_module_value
-            module_values = vars(loaded_module)
-            for attribute_name, attribute_value in tuple(module_values.items()):
-                if attribute_value is logging_model:
-                    module_values[attribute_name] = original_model
-
-        for loaded_module, attribute_name in reversed(self._rebound_names):
-            vars(loaded_module)[attribute_name] = original_model
+        restore_module_names(self._rebound_names, original_model)
+        rebind_module_names(logging_model, original_model)
 
         self._installed = False
         self._observer = None
         self._original_model = None
         self._logging_model = None
         self._rebound_names = []
+        self._counter_snapshots.clear()
 
 
 def _wrap_solve_entry_point(
@@ -186,10 +143,45 @@ def _wrap_solve_entry_point(
         *args: Any,
         **kwargs: Any,
     ) -> Any:
-        original_signature.bind(*args, **kwargs)
+        observer: SolveObserver | None = integration._observer
         model: Any = receiver_of(original_entry_point, args, kwargs)
-        if not integration._installed or integration._observer is None:
+        if model is None or observer is None:
             return original_entry_point(*args, **kwargs)
+        original_signature.bind(*args, **kwargs)
+        counter_snapshots: WeakKeyDictionary[
+            Any,
+            tuple[int | MissingReason, dict[str, float | MissingReason]],
+        ] = integration._counter_snapshots
+        stage_before_solve: int | MissingReason = _read_value(
+            lambda: int(model.getStage()),
+            MissingReason.FAILED,
+        )
+        counter_snapshot: tuple[
+            int | MissingReason,
+            dict[str, float | MissingReason],
+        ] | None = None
+        counter_cache_available: bool = True
+        try:
+            counter_snapshot = counter_snapshots.get(model)
+        except Exception:
+            counter_cache_available = False
+        counters_before_solve: dict[str, float | MissingReason] | None = None
+        if not counter_cache_available or isinstance(
+            stage_before_solve,
+            MissingReason,
+        ):
+            counters_before_solve = _unavailable_solve_counters()
+        elif counter_snapshot is None:
+            if stage_before_solve != pyscipopt.scip.PY_SCIP_STAGE.PROBLEM:
+                counters_before_solve = _unavailable_solve_counters()
+        else:
+            previous_stage: int | MissingReason = counter_snapshot[0]
+            if isinstance(previous_stage, MissingReason):
+                counters_before_solve = _unavailable_solve_counters()
+            elif stage_before_solve == previous_stage:
+                counters_before_solve = counter_snapshot[1]
+            elif stage_before_solve != pyscipopt.scip.PY_SCIP_STAGE.PROBLEM:
+                counters_before_solve = _unavailable_solve_counters()
 
         # NOTE: SCIP changes parameters while solving, so capture configured values first.
         parameters_before_solve: tuple[SolverParameter, ...] = _read_parameters(
@@ -203,41 +195,87 @@ def _wrap_solve_entry_point(
         def extract(
             result: Any | None, error: BaseException | None
         ) -> SolveObservation:
-            extraction_error: Exception
             try:
+                counters_after_solve: dict[str, float | MissingReason] | None = None
+                if error is None:
+                    counters_after_solve = _read_solve_counters(model)
+                    stage_after_solve: int | MissingReason = _read_value(
+                        lambda: int(model.getStage()),
+                        MissingReason.FAILED,
+                    )
+                    try:
+                        counter_snapshots[model] = (
+                            stage_after_solve,
+                            counters_after_solve,
+                        )
+                    except Exception:
+                        counter_snapshots.clear()
+                else:
+                    try:
+                        counter_snapshots[model] = (
+                            MissingReason.FAILED,
+                            _unavailable_solve_counters(),
+                        )
+                    except Exception:
+                        counter_snapshots.clear()
                 return _extract_observation(
                     model,
-                    result,
                     error,
                     parameters_before_solve,
+                    counters_before_solve,
+                    counters_after_solve,
                 )
-            except _OBSERVATION_BUILD_ERRORS as extraction_error:
+            except Exception as extraction_error:
                 raise ObservationError(
                     "Could not build a PySCIPOpt solve observation."
                 ) from extraction_error
 
-        return integration._observer.observe(integration.api, call, extract)
+        return observer.observe(integration.api, call, extract)
 
     return observed_entry_point
 
 
 def _extract_observation(
     model: Any,
-    result: Any | None,
     error: BaseException | None,
     parameters_before_solve: tuple[SolverParameter, ...],
+    counters_before_solve: dict[str, float | MissingReason] | None,
+    counters_after_solve: dict[str, float | MissingReason] | None,
 ) -> SolveObservation:
     """The SDK-free observation of one PySCIPOpt optimization call."""
+    if error is not None:
+        termination: Termination = (
+            Termination.INTERRUPTED
+            if isinstance(error, KeyboardInterrupt)
+            else Termination.ERROR
+        )
+        metrics: ReportedMetrics = ReportedMetrics(
+            has_objective=None,
+            sense=None,
+            objective_value=MissingReason.FAILED,
+            dual_bound=MissingReason.FAILED,
+            solver_time_seconds=MissingReason.FAILED,
+            statistics={},
+            native={},
+        )
+        metadata: ReportedMetadata = _read_metadata(model, parameters_before_solve)
+        outcome: ReportedOutcome = ReportedOutcome(
+            raw_status="unknown",
+            termination=termination,
+            has_solution=None,
+        )
+        return SolveObservation(
+            api="pyscipopt",
+            outcome=outcome,
+            metrics=metrics,
+            metadata=metadata,
+        )
+
     raw_status: str = _read_value(lambda: str(model.getStatus()), "unknown")
     has_solution: bool | None = _read_value(lambda: model.getNSols() > 0, None)
     termination: Termination = _STATUS_TERMINATIONS.get(
         raw_status.lower(), Termination.UNKNOWN
     )
-
-    if isinstance(error, KeyboardInterrupt):
-        termination = Termination.INTERRUPTED
-    elif error is not None:
-        termination = Termination.ERROR
 
     has_objective: bool | None = _read_has_objective(model)
     sense_name: str | MissingReason = _read_value(
@@ -270,30 +308,58 @@ def _extract_observation(
             objective_value = _read_scip_number(
                 lambda: float(model.getObjVal()),
                 solver_infinity,
-                _OBJECTIVE_VALUE_ERRORS,
             )
 
-    solver_time_seconds: float | MissingReason = _read_number(
-        lambda: float(model.getSolvingTime())
+    assert counters_after_solve is not None
+    solver_time_seconds: float | MissingReason = _counter_difference(
+        counters_after_solve["solver_time_seconds"],
+        counters_before_solve,
+        "solver_time_seconds",
     )
-    node_count: float | MissingReason = _read_number(lambda: float(model.getNNodes()))
+    node_count: float | MissingReason = _counter_difference(
+        counters_after_solve["node_count"],
+        counters_before_solve,
+        "node_count",
+    )
     statistics: dict[str, float | MissingReason] = {"node_count": node_count}
     native: dict[str, float] = {}
 
-    _add_native_number(native, "solution_count", lambda: float(model.getNSols()))
-    _add_native_number(native, "solutions_found", lambda: float(model.getNSolsFound()))
-    _add_native_number(native, "lp_count", lambda: float(model.getNLPs()))
-    _add_native_number(native, "lp_iterations", lambda: float(model.getNLPIterations()))
-    _add_native_number(
-        native, "total_node_count", lambda: float(model.getNTotalNodes())
+    _add_native_counter(
+        native,
+        "solution_count",
+        counters_after_solve["solution_count"],
+        counters_before_solve,
     )
-    _add_native_number(
-        native, "presolving_time_seconds", lambda: float(model.getPresolvingTime())
+    _add_native_counter(
+        native,
+        "solutions_found",
+        counters_after_solve["solutions_found"],
+        counters_before_solve,
     )
-    _add_native_number(
-        native, "total_time_seconds", lambda: float(model.getTotalTime())
+    _add_native_counter(
+        native,
+        "lp_count",
+        counters_after_solve["lp_count"],
+        counters_before_solve,
     )
-
+    _add_native_counter(
+        native,
+        "lp_iterations",
+        counters_after_solve["lp_iterations"],
+        counters_before_solve,
+    )
+    _add_native_counter(
+        native,
+        "total_node_count",
+        counters_after_solve["total_node_count"],
+        counters_before_solve,
+    )
+    _add_native_counter(
+        native,
+        "presolving_time_seconds",
+        counters_after_solve["presolving_time_seconds"],
+        counters_before_solve,
+    )
     if has_solution is not False and has_objective is not False:
         gap: float | MissingReason = _read_scip_number(
             lambda: float(model.getGap()),
@@ -383,10 +449,8 @@ def _read_metadata(
     if not isinstance(variables, MissingReason):
         integer_variable_count: int = 0
         integer_variable_count_available: bool = True
-        variable: Any
-        variable_type: str | MissingReason
         for variable in variables:
-            variable_type = _read_value(
+            variable_type: str | MissingReason = _read_value(
                 lambda variable=variable: str(variable.vtype()).upper(),
                 MissingReason.FAILED,
             )
@@ -434,8 +498,6 @@ def _read_default_parameters(
         return None
 
     default_parameters: dict[str, bool | int | float | str] = {}
-    parameter_name: Any
-    parameter_value: Any
     for parameter_name, parameter_value in default_values.items():
         if isinstance(parameter_name, str) and isinstance(
             parameter_value,
@@ -454,13 +516,10 @@ def _read_parameters(
         return ()
 
     parameters: list[SolverParameter] = []
-    parameter_name: str
-    default_value: bool | int | float | str
     for parameter_name, default_value in default_parameters.items():
         parameter_value: Any | MissingReason = _read_value(
             lambda parameter_name=parameter_name: model.getParam(parameter_name),
             MissingReason.FAILED,
-            _PARAMETER_READ_ERRORS,
         )
         if isinstance(parameter_value, MissingReason):
             continue
@@ -479,13 +538,48 @@ def _read_parameters(
     return tuple(parameters)
 
 
-def _add_native_number(
+def _read_solve_counters(model: Any) -> dict[str, float | MissingReason]:
+    """The current values of PySCIPOpt counters and timers."""
+    return {
+        "solver_time_seconds": _read_number(lambda: float(model.getSolvingTime())),
+        "node_count": _read_number(lambda: float(model.getNNodes())),
+        "solution_count": _read_number(lambda: float(model.getNSols())),
+        "solutions_found": _read_number(lambda: float(model.getNSolsFound())),
+        "lp_count": _read_number(lambda: float(model.getNLPs())),
+        "lp_iterations": _read_number(lambda: float(model.getNLPIterations())),
+        "total_node_count": _read_number(lambda: float(model.getNTotalNodes())),
+        "presolving_time_seconds": _read_number(
+            lambda: float(model.getPresolvingTime())
+        ),
+    }
+
+
+def _unavailable_solve_counters() -> dict[str, float | MissingReason]:
+    """Unavailable PySCIPOpt counters for a per-solve baseline."""
+    return {
+        "solver_time_seconds": MissingReason.FAILED,
+        "node_count": MissingReason.FAILED,
+        "solution_count": MissingReason.FAILED,
+        "solutions_found": MissingReason.FAILED,
+        "lp_count": MissingReason.FAILED,
+        "lp_iterations": MissingReason.FAILED,
+        "total_node_count": MissingReason.FAILED,
+        "presolving_time_seconds": MissingReason.FAILED,
+    }
+
+
+def _add_native_counter(
     native: dict[str, float],
     metric_name: str,
-    reader: Callable[[], float],
+    current_value: float | MissingReason,
+    counters_before_solve: dict[str, float | MissingReason] | None,
 ) -> None:
-    """One available SCIP-specific metric in native metrics."""
-    value: float | MissingReason = _read_number(reader)
+    """One available PySCIPOpt counter difference in native metrics."""
+    value: float | MissingReason = _counter_difference(
+        current_value,
+        counters_before_solve,
+        metric_name,
+    )
     if isinstance(value, MissingReason):
         return
     native[metric_name] = value
@@ -493,19 +587,41 @@ def _add_native_number(
 
 def _read_number(
     reader: Callable[[], float],
-    read_errors: tuple[type[Exception], ...] = _PYSCIPOPT_READ_ERRORS,
 ) -> float | MissingReason:
     """A guarded PySCIPOpt numeric value."""
-    return _read_value(reader, MissingReason.FAILED, read_errors)
+    return _read_value(reader, MissingReason.FAILED)
+
+
+def _counter_difference(
+    current_value: float | MissingReason,
+    counters_before_solve: dict[str, float | MissingReason] | None,
+    counter_name: str,
+) -> float | MissingReason:
+    """The nonnegative difference between two PySCIPOpt counter values."""
+    if isinstance(current_value, MissingReason):
+        return current_value
+    if counters_before_solve is None:
+        if counter_name == "solution_count":
+            return MissingReason.UNSUPPORTED
+        return current_value
+    previous_value: float | MissingReason = counters_before_solve.get(
+        counter_name,
+        MissingReason.FAILED,
+    )
+    if isinstance(previous_value, MissingReason):
+        return previous_value
+    difference: float = current_value - previous_value
+    if difference < 0.0:
+        return MissingReason.FAILED
+    return difference
 
 
 def _read_scip_number(
     reader: Callable[[], float],
     solver_infinity: float | MissingReason,
-    read_errors: tuple[type[Exception], ...] = _PYSCIPOPT_READ_ERRORS,
 ) -> float | MissingReason:
     """A PySCIPOpt numeric value with its infinity sentinel normalized."""
-    value: float | MissingReason = _read_number(reader, read_errors)
+    value: float | MissingReason = _read_number(reader)
     if isinstance(value, MissingReason):
         return value
     if math.isinf(value):
@@ -522,10 +638,9 @@ def _read_scip_number(
 def _read_value[Value](
     reader: Callable[[], Value],
     unavailable: Value,
-    read_errors: tuple[type[Exception], ...] = _PYSCIPOPT_READ_ERRORS,
 ) -> Value:
     """A PySCIPOpt value or its fallback after a supported read error."""
     try:
         return reader()
-    except read_errors:
+    except Exception:
         return unavailable

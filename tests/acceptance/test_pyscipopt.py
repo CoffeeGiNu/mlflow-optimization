@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pytest
 from mlflow.entities import Run
-from pyscipopt import Model
+from pyscipopt import Model, SCIP_PARAMSETTING, quicksum
 
 from conftest import Tracking
 from mlflow_optimization import autolog
 
 
-def _single_solve_run(
-    tracking: Tracking, termination: str, has_solution: bool
-) -> Run:
+def _single_solve_run(tracking: Tracking, termination: str, has_solution: bool) -> Run:
     """The only solve run recorded by one acceptance scenario."""
     runs: list[Run] = tracking.solve_runs()
     assert len(runs) == 1
@@ -48,7 +47,6 @@ def test_optimal_mip_records_solution_metrics_and_engine(tracking: Tracking) -> 
     assert "dual_bound" in run.data.metrics
     assert "absolute_gap" in run.data.metrics
     assert "relative_gap" in run.data.metrics
-    metric_name: str
     for metric_name in (
         "objective_value",
         "dual_bound",
@@ -70,7 +68,6 @@ def test_infeasible_mip_records_no_solution_reasons(tracking: Tracking) -> None:
 
     run: Run = _single_solve_run(tracking, "infeasible", False)
     assert run.data.tags["optimization.has_objective"] == "true"
-    metric_name: str
     for metric_name in ("objective_value", "absolute_gap", "relative_gap"):
         _assert_missing_reason(run, metric_name, "no_solution")
 
@@ -102,7 +99,6 @@ def test_time_limit_without_solution_records_missing_objective(
 
     run: Run = _single_solve_run(tracking, "time_limit", False)
     assert run.data.tags["optimization.has_objective"] == "true"
-    metric_name: str
     for metric_name in ("objective_value", "absolute_gap", "relative_gap"):
         _assert_missing_reason(run, metric_name, "no_solution")
 
@@ -146,6 +142,48 @@ def test_objective_bound_direction_matches_sense(
         assert objective_value <= dual_bound
 
 
+@pytest.mark.parametrize("maximize", (False, True))
+def test_node_limit_records_nonzero_gap(tracking: Tracking, maximize: bool) -> None:
+    autolog(solvers=["pyscipopt"])
+    model: Model = Model()
+    model.hideOutput()
+    model.setPresolve(SCIP_PARAMSETTING.OFF)
+    model.setHeuristics(SCIP_PARAMSETTING.OFF)
+    model.setSeparating(SCIP_PARAMSETTING.OFF)
+    model.setLongintParam("limits/nodes", 1)
+    variables: list[Any] = [model.addVar(vtype="B") for index in range(60)]
+    for constraint_index in range(5):
+        model.addCons(
+            quicksum(
+                ((index * 17 + constraint_index * 13) % 31 + 1) * variables[index]
+                for index in range(60)
+            )
+            <= 180
+        )
+    direction: int = 1 if maximize else -1
+    model.setObjective(
+        direction
+        * quicksum((index * 11 % 37 + 1) * variables[index] for index in range(60)),
+        "maximize" if maximize else "minimize",
+    )
+    solution: Any = model.createSol()
+    for variable in variables:
+        model.setSolVal(solution, variable, 0)
+    assert model.addSol(solution)
+
+    model.optimize()
+
+    assert str(model.getStatus()) == "nodelimit"
+    run: Run = _single_solve_run(tracking, "node_limit", True)
+    objective: float = run.data.metrics["objective_value"]
+    bound: float = run.data.metrics["dual_bound"]
+    assert math.isfinite(objective) and math.isfinite(bound)
+    assert objective == pytest.approx(model.getObjVal())
+    assert bound == pytest.approx(model.getDualbound())
+    assert direction * (bound - objective) > 0
+    assert run.data.metrics["absolute_gap"] == pytest.approx(abs(objective - bound))
+
+
 def test_explicit_solver_parameter_is_recorded(tracking: Tracking) -> None:
     autolog(solvers=["pyscipopt"])
     model: Model = Model()
@@ -157,6 +195,49 @@ def test_explicit_solver_parameter_is_recorded(tracking: Tracking) -> None:
 
     run: Run = _single_solve_run(tracking, "optimal", True)
     assert float(run.data.params["solver_param.limits/time"]) == 5.0
+
+
+def test_free_transform_starts_new_solver_counters(tracking: Tracking) -> None:
+    autolog(solvers=["pyscipopt"])
+    model: Model = Model()
+    model.hideOutput()
+    variable: Any = model.addVar("decision", vtype="B")
+    model.setObjective(variable, "maximize")
+
+    model.optimize()
+    first_solutions_found: int = model.getNSolsFound()
+    model.freeTransform()
+    model.optimize()
+
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 2
+    assert first_solutions_found > 0
+    assert model.getNSolsFound() > 0
+    assert runs[1].data.metrics["solver_time_seconds"] == model.getSolvingTime()
+    assert runs[1].data.metrics["pyscipopt.solutions_found"] == model.getNSolsFound()
+    assert "pyscipopt.total_time_seconds" not in runs[1].data.metrics
+
+
+def test_unhashable_model_still_solves_and_records(tracking: Tracking) -> None:
+    autolog(solvers=["pyscipopt"])
+
+    class UnhashableModel(Model):
+        __hash__: None = None
+
+    model: Model = UnhashableModel()
+    model.hideOutput()
+    variable: Any = model.addVar("decision", vtype="B")
+    model.setObjective(variable, "maximize")
+
+    model.optimize()
+    model.optimize()
+
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 2
+    for run in runs:
+        assert run.data.tags["optimization.termination"] == "optimal"
+        assert run.data.metrics["objective_value"] == 1
+        assert "solver_time_seconds" not in run.data.metrics
 
 
 def test_model_imported_before_autolog_is_observed(tracking: Tracking) -> None:
