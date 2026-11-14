@@ -44,6 +44,24 @@ def test_cp_sat_records_an_optimal_optimization(tracking: Any) -> None:
     assert metrics["objective_value"] >= metrics["dual_bound"]
 
 
+def test_cp_sat_records_genuine_zero_objective_and_bound(tracking: Any) -> None:
+    autolog(solvers=["cp_sat"])
+    model: cp_model.CpModel = cp_model.CpModel()
+    value: cp_model.IntVar = model.new_int_var(0, 5, "value")
+    model.minimize(value)
+    solver: cp_model.CpSolver = cp_model.CpSolver()
+    solver.solve(model)
+
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 1
+    metrics: dict[str, float] = runs[0].data.metrics
+    tags: dict[str, str] = runs[0].data.tags
+    assert metrics["objective_value"] == 0
+    assert metrics["dual_bound"] == 0
+    assert "optimization.missing.objective_value" not in tags
+    assert "optimization.missing.dual_bound" not in tags
+
+
 def test_cp_sat_records_an_infeasible_optimization(tracking: Any) -> None:
     autolog(solvers=["cp_sat"])
     model: cp_model.CpModel = cp_model.CpModel()
