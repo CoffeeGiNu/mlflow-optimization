@@ -20,8 +20,6 @@ INTEGRATION_MODULES: dict[str, str] = {
     for integration_api in ("gurobipy", "pyscipopt", "pyomo", "mathopt", "cp_sat", "routing")
 }
 
-_run_store: MlflowRunStore | None = None
-_artifact_store: MlflowArtifactStore | None = None
 _record_solve: RecordSolve | None = None
 _autolog_manager: AutologManager | None = None
 
@@ -36,9 +34,7 @@ def configure(
 ) -> None:
     """Apply an autolog configuration to the process-wide wiring."""
     global _autolog_manager
-    global _artifact_store
     global _record_solve
-    global _run_store
 
     integrations: list[SolverIntegration] = []
     if not disable:
@@ -61,8 +57,6 @@ def configure(
         record_solve: RecordSolve = RecordSolve(run_store, artifact_store, record_options)
         autolog_manager: AutologManager = AutologManager(record_solve)
 
-        _run_store = run_store
-        _artifact_store = artifact_store
         _record_solve = record_solve
         _autolog_manager = autolog_manager
     else:
