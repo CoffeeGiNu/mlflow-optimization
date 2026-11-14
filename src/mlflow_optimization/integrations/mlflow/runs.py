@@ -8,10 +8,12 @@ from typing import Any
 
 import mlflow
 from mlflow.entities import Metric, Param, Run, RunTag
+from mlflow.exceptions import MlflowException
 from mlflow.tracking import MlflowClient
 from mlflow.tracking.context.registry import resolve_tags
 from mlflow.tracking.fluent import ActiveRun, _get_experiment_id
 from mlflow.utils.mlflow_tags import MLFLOW_PARENT_RUN_ID, MLFLOW_RUN_NAME
+from mlflow.utils.server_info import ServerInfoRequestError
 from mlflow.utils.validation import (
     MAX_BATCH_LOG_REQUEST_SIZE,
     MAX_ENTITY_KEY_LENGTH,
@@ -22,29 +24,40 @@ from mlflow.utils.validation import (
     path_not_unique,
     validate_param_and_metric_name,
 )
+from requests.exceptions import RequestException
 
 from mlflow_optimization.features.runs.models import RunRef, SolveRecord
+from mlflow_optimization.features.runs.ports import RunStoreError
 
 
 class MlflowRunStore:
     """Solve runs stored through the MLflow tracking client."""
 
     def active_run(self: MlflowRunStore) -> RunRef | None:
-        active_mlflow_run: ActiveRun | None = mlflow.active_run()
-        if active_mlflow_run is None:
-            return None
-        return RunRef(
-            run_id=active_mlflow_run.info.run_id,
-            experiment_id=active_mlflow_run.info.experiment_id,
-        )
+        try:
+            active_mlflow_run: ActiveRun | None = mlflow.active_run()
+            if active_mlflow_run is None:
+                return None
+            return RunRef(
+                run_id=active_mlflow_run.info.run_id,
+                experiment_id=active_mlflow_run.info.experiment_id,
+            )
+        except (MlflowException, ServerInfoRequestError, RequestException, OSError) as error:
+            raise RunStoreError("MLflow run storage failed.") from error
 
     def save(self: MlflowRunStore, record: SolveRecord, parent: RunRef | None) -> RunRef:
+        try:
+            return self._save(record, parent)
+        except (MlflowException, ServerInfoRequestError, RequestException, OSError) as error:
+            raise RunStoreError("MLflow run storage failed.") from error
+
+    def _save(self: MlflowRunStore, record: SolveRecord, parent: RunRef | None) -> RunRef:
         tracking_client: MlflowClient = MlflowClient(tracking_uri=mlflow.get_tracking_uri())
         experiment_id: str
         if parent is None:
             resolved_experiment_id: str | None = _get_experiment_id()
             if resolved_experiment_id is None:
-                raise RuntimeError("MLflow did not resolve an experiment ID.")
+                raise RunStoreError("MLflow did not resolve an experiment ID.")
             experiment_id = resolved_experiment_id
         else:
             experiment_id = parent.experiment_id
@@ -105,17 +118,23 @@ class MlflowRunStore:
         )
 
     def log_metric(self: MlflowRunStore, run: RunRef, key: str, value: float) -> None:
-        tracking_client: MlflowClient = MlflowClient(tracking_uri=mlflow.get_tracking_uri())
-        tracking_client.log_metric(
-            run_id=run.run_id,
-            key=_sanitize_key(key),
-            value=value,
-            synchronous=True,
-        )
+        try:
+            tracking_client: MlflowClient = MlflowClient(tracking_uri=mlflow.get_tracking_uri())
+            tracking_client.log_metric(
+                run_id=run.run_id,
+                key=_sanitize_key(key),
+                value=value,
+                synchronous=True,
+            )
+        except (MlflowException, ServerInfoRequestError, RequestException, OSError) as error:
+            raise RunStoreError("MLflow run storage failed.") from error
 
     def set_tags(self: MlflowRunStore, run: RunRef, tags: Mapping[str, str]) -> None:
-        tracking_client: MlflowClient = MlflowClient(tracking_uri=mlflow.get_tracking_uri())
-        self._log_tag_batches(tracking_client, run.run_id, _make_tag_entities(tags))
+        try:
+            tracking_client: MlflowClient = MlflowClient(tracking_uri=mlflow.get_tracking_uri())
+            self._log_tag_batches(tracking_client, run.run_id, _make_tag_entities(tags))
+        except (MlflowException, ServerInfoRequestError, RequestException, OSError) as error:
+            raise RunStoreError("MLflow run storage failed.") from error
 
     def _log_metric_batches(
         self: MlflowRunStore,
