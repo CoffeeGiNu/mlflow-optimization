@@ -168,6 +168,47 @@ def test_unusable_tracking_store_does_not_change_solve_result_or_hide_warning(
     assert tracking.solve_runs() == []
 
 
+def test_failed_recording_clears_last_solve_and_recovers(
+    tracking: Tracking,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fakes import FakeSolver
+
+    autolog(libraries=["fake"])
+    first_result: str = FakeSolver(status="optimal").solve()
+    first_solve: SolveRun | None = last_solve()
+
+    assert first_result == "optimal"
+    assert first_solve is not None
+    assert len(tracking.solve_runs()) == 1
+
+    def fail_create_run(
+        client: MlflowClient, *arguments: object, **keywords: object
+    ) -> Run:
+        raise MlflowException("Tracking store is unavailable.")
+
+    with monkeypatch.context() as failure:
+        failure.setattr(MlflowClient, "create_run", fail_create_run)
+        with pytest.warns(MlflowOptimizationWarning, match="Could not record solve"):
+            failed_result: str = FakeSolver(status="feasible").solve()
+
+        assert failed_result == "feasible"
+        assert last_solve() is None
+        assert len(tracking.solve_runs()) == 1
+
+    first_solve.set_tags({"saved_handle": "still usable"})
+    first_run: Run = tracking.client.get_run(first_solve.run_id)
+    assert first_run.data.tags["saved_handle"] == "still usable"
+
+    recovery_result: str = FakeSolver(status="optimal").solve()
+    recovery_solve: SolveRun | None = last_solve()
+
+    assert recovery_result == "optimal"
+    assert recovery_solve is not None
+    assert recovery_solve.run_id != first_solve.run_id
+    assert len(tracking.solve_runs()) == 2
+
+
 def test_solve_runs_have_no_artifacts_by_default(tracking: Tracking) -> None:
     from fakes import FakeSolver
 
