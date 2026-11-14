@@ -7,7 +7,7 @@ Supported solvers: [gurobipy, PySCIPOpt, Pyomo, OR-Tools (MathOpt, CP-SAT, Routi
 ## install
 
 ```bash
-pip install .
+pip install mlflow-optimization
 ```
 
 ## usage
