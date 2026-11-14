@@ -7,7 +7,9 @@ authors = [
     { name = "CoffeeGiNu", email = "69104897+CoffeeGiNu@users.noreply.github.com" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "mlflow-skinny>=3.18.0",
+]
 
 [project.scripts]
 mlflow-optimization = "mlflow_optimization:main"
@@ -15,3 +17,13 @@ mlflow-optimization = "mlflow_optimization:main"
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "gurobipy>=14.0.0",
+    "highspy>=1.16.0",
+    "ortools>=9.15.6755",
+    "pyomo>=6.10.1",
+    "pyscipopt>=6.3.0",
+    "pytest>=9.2.0",
+]
