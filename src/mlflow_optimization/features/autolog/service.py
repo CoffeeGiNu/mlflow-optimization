@@ -1,6 +1,6 @@
 """Activation of integrations and arbitration of observed solve calls."""
 
-import warnings
+import logging
 from collections.abc import Callable, Iterator, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import replace
@@ -10,15 +10,25 @@ from time import perf_counter, time
 from typing import cast
 from uuid import uuid4
 
-from mlflow_optimization.common.diagnostics import MlflowOptimizationWarning, warn
+from mlflow_optimization.common.diagnostics import warn
 
 from .types import CompletedSolve, SolveObservation
-from .ports import ObservationError, SolverIntegration, SolveSink
+from .ports import SolverIntegration, SolveSink
 
 
 _solve_indices: Iterator[int] = count(1)
 _solve_index_lock: Lock = Lock()
-_observing: ContextVar[bool] = ContextVar("autolog_observing", default=False)
+_logger: logging.Logger = logging.getLogger("mlflow_optimization")
+
+
+class _SolveScope:
+    """The lifetime of an observed solve call."""
+
+    def __init__(self) -> None:
+        self.active: bool = True
+
+
+_observing: ContextVar[_SolveScope | None] = ContextVar("autolog_observing", default=None)
 
 
 class AutologManager:
@@ -57,9 +67,11 @@ class AutologManager:
         extract: Callable[[T | None, BaseException | None], SolveObservation],
     ) -> T:
         """The result of ``call()``, observed as one solve unless nested or disabled."""
-        if not self._enabled or _observing.get():
+        parent: _SolveScope | None = _observing.get()
+        if not self._enabled or (parent is not None and parent.active):
             return call()
-        token: Token[bool] = _observing.set(True)
+        scope: _SolveScope = _SolveScope()
+        token: Token[_SolveScope | None] = _observing.set(scope)
         try:
             failures: list[str] = []
 
@@ -67,6 +79,9 @@ class AutologManager:
                 """The result of a guarded observation operation."""
                 try:
                     return operation()
+                except Warning as warning:
+                    _logger.warning("%s", warning)
+                    return None
                 # NOTE: A defect in logging must never change the result of the user's solve.
                 except Exception:
                     failures.append("Solve observation failed")
@@ -84,7 +99,10 @@ class AutologManager:
                 observation: SolveObservation | None = None
                 try:
                     observation = extract(result, solve.error)
-                except ObservationError:
+                except Warning as warning:
+                    _logger.warning("%s", warning)
+                # NOTE: A defect in extraction must never change the result of the user's solve.
+                except Exception:
                     failures.append("Solve extraction failed")
                 self._sink.record(replace(solve, observation=observation), context)
 
@@ -93,19 +111,22 @@ class AutologManager:
                 result = call()
             except BaseException as error:
                 end: float = perf_counter()
+                scope.active = False
                 end_time_ms: int = int(time() * 1000)
                 solve: CompletedSolve = CompletedSolve(
                     api, solve_id, solve_index, start_time_ms, end_time_ms,
                     end - start, None, error,
                 )
                 guard(lambda: finish(solve))
-                with warnings.catch_warnings():
-                    warnings.simplefilter("always", MlflowOptimizationWarning)
-                    failure: str
-                    for failure in failures:
+                failure: str
+                for failure in failures:
+                    try:
                         warn(failure)
+                    except Warning as warning:
+                        _logger.warning("%s", warning)
                 raise
             end = perf_counter()
+            scope.active = False
             end_time_ms = int(time() * 1000)
             solve = CompletedSolve(
                 api, solve_id, solve_index, start_time_ms, end_time_ms,
@@ -113,7 +134,11 @@ class AutologManager:
             )
             guard(lambda: finish(solve))
             for failure in failures:
-                warn(failure)
+                try:
+                    warn(failure)
+                except Warning as warning:
+                    _logger.warning("%s", warning)
             return cast(T, result)
         finally:
+            scope.active = False
             _observing.reset(token)
