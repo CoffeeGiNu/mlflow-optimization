@@ -50,6 +50,19 @@ class SolveRun:
         artifacts: ArtifactStore,
         options: RecordOptions,
     ) -> None:
+        """Initialize a handle for a recorded solve.
+
+        Parameters
+        ----------
+        run : RunReference
+            Reference to the recorded solve's run.
+        runs : RunStore
+            Store used to add metrics and tags to the run.
+        artifacts : ArtifactStore
+            Store used to attach files to the run.
+        options : RecordOptions
+            Options controlling recorded solver data and artifact logging.
+        """
         self.run_id: str = run.run_id
         self._run: RunReference = run
         self._runs: RunStore = runs

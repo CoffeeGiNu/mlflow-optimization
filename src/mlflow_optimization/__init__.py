@@ -18,7 +18,29 @@ def autolog(
     log_solver_metrics: bool = True,
     log_artifacts: bool = True,
 ) -> None:
-    """Switch automatic logging of solves on, off, or to a new configuration."""
+    """Configure automatic logging of optimization solves.
+
+    Parameters
+    ----------
+    disable : bool, default False
+        Disable automatic logging; other settings are ignored when True.
+    libraries : Iterable[str] or None, optional
+        Supported names: gurobipy, pyscipopt, pyomo, mathopt, cp_sat, routing.
+        None selects all available integrations; an empty iterable selects none.
+    log_solver_parameters : bool, default True
+        Whether solver parameters are logged.
+    log_solver_metrics : bool, default True
+        Whether native solver metrics are logged.
+    log_artifacts : bool, default True
+        Whether files attached through ``SolveRun.log_artifact`` are logged.
+
+    Raises
+    ------
+    ImportError
+        An explicitly selected integration cannot be imported.
+    ValueError
+        An unsupported library name is selected while logging is enabled.
+    """
     _bootstrap.configure(
         disable=disable,
         libraries=libraries,
