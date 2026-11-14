@@ -26,7 +26,7 @@ def test_disabling_autolog_restores_solver_callables_without_writes(
 
     original_solve: Callable[..., str] = FakeSolver.solve
 
-    autolog(solvers=["fake"])
+    autolog(libraries=["fake"])
     assert FakeSolver.solve is not original_solve
 
     autolog(disable=True)
@@ -68,17 +68,17 @@ def test_repeated_autolog_keeps_selected_adapter_installed(
     monkeypatch.setattr(FakeSolverAdapter, "install", track_install)
     monkeypatch.setattr(FakeSolverAdapter, "uninstall", track_uninstall)
 
-    autolog(solvers=["fake"])
+    autolog(libraries=["fake"])
     solver: FakeSolver = FakeSolver()
     solver.solve()
-    autolog(solvers=["fake"])
+    autolog(libraries=["fake"])
     solver.solve()
 
     assert len(installed_adapters) == 1
     assert uninstalled_adapters == []
 
-    autolog(solvers=[])
-    autolog(solvers=["fake"])
+    autolog(libraries=[])
+    autolog(libraries=["fake"])
     solver.solve()
 
     assert len(installed_adapters) == 2
@@ -95,7 +95,7 @@ def test_disabling_autolog_preserves_recording_options(
     from fakes import FakeSolver
 
     autolog(
-        solvers=["fake"],
+        libraries=["fake"],
         log_solver_parameters=False,
         log_artifacts=False,
     )
@@ -158,7 +158,7 @@ def test_unusable_tracking_store_does_not_change_solve_result_or_hide_warning(
         raise MlflowException("Tracking store is unavailable.")
 
     monkeypatch.setattr(MlflowClient, "create_run", fail_create_run)
-    autolog(solvers=["fake"])
+    autolog(libraries=["fake"])
     solver: FakeSolver = FakeSolver(status="feasible")
 
     with pytest.warns(MlflowOptimizationWarning):
@@ -171,7 +171,7 @@ def test_unusable_tracking_store_does_not_change_solve_result_or_hide_warning(
 def test_solve_runs_have_no_artifacts_by_default(tracking: Tracking) -> None:
     from fakes import FakeSolver
 
-    autolog(solvers=["fake"])
+    autolog(libraries=["fake"])
     solver: FakeSolver = FakeSolver()
     solver.solve()
 
@@ -186,7 +186,7 @@ def test_unavailable_solver_values_are_missing_with_reasons_and_other_values_rem
 ) -> None:
     from fakes import FakeSolver
 
-    autolog(solvers=["fake"])
+    autolog(libraries=["fake"])
     solver: FakeSolver = FakeSolver(
         objective=None,
         bound=None,
@@ -224,7 +224,7 @@ def test_last_solve_additions_stay_on_their_solve(
 ) -> None:
     from fakes import FakeSolver
 
-    autolog(solvers=["fake"])
+    autolog(libraries=["fake"])
     first_solver: FakeSolver = FakeSolver()
     first_solver.solve()
     first_solve: SolveRun | None = last_solve()
@@ -272,7 +272,7 @@ def test_disabled_artifact_logging_warns_and_refuses_artifact(
 ) -> None:
     from fakes import FakeSolver
 
-    autolog(solvers=["fake"], log_artifacts=False)
+    autolog(libraries=["fake"], log_artifacts=False)
     solver: FakeSolver = FakeSolver()
     solver.solve()
     solve_run: SolveRun | None = last_solve()
@@ -290,7 +290,7 @@ def test_disabled_artifact_logging_warns_and_refuses_artifact(
 def test_solve_exception_propagates_and_marks_run_failed(tracking: Tracking) -> None:
     from fakes import FakeSolver
 
-    autolog(solvers=["fake"])
+    autolog(libraries=["fake"])
     solve_error: RuntimeError = RuntimeError("solver failed")
     solver: FakeSolver = FakeSolver(raises=solve_error)
 
@@ -309,7 +309,7 @@ def test_diagnostic_warning_as_error_does_not_change_or_suppress_solve(
 ) -> None:
     from fakes import FakeSolver
 
-    autolog(solvers=["fake"])
+    autolog(libraries=["fake"])
     solver: FakeSolver = FakeSolver(status="optimal", has_solution=False)
 
     with warnings.catch_warnings():
@@ -328,7 +328,7 @@ def test_failed_solve_payload_contains_only_documented_keys_and_no_error_message
 ) -> None:
     from fakes import FakeSolver
 
-    autolog(solvers=["fake"])
+    autolog(libraries=["fake"])
     solver: FakeSolver = FakeSolver(
         raises=FileNotFoundError("/input/SECRET/data.csv")
     )
@@ -432,7 +432,7 @@ def test_wall_time_excludes_a_slow_run_store_save(
     assert baseline_result == "optimal"
 
     monkeypatch.setattr(MlflowRunStore, "save", slow_save)
-    autolog(solvers=["fake"])
+    autolog(libraries=["fake"])
     solver: FakeSolver = FakeSolver()
     result: str = solver.solve()
 
@@ -450,7 +450,7 @@ def test_unstoreable_context_tag_warns_without_losing_solve(
 
     from fakes import FakeSolver
 
-    autolog(solvers=["fake"])
+    autolog(libraries=["fake"])
     long_tag_key: str = shake_256(b"unstoreable tracker tag").hexdigest(200)
     assert len(long_tag_key) == 400
     solver: FakeSolver = FakeSolver()

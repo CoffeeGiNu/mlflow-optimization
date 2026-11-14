@@ -32,7 +32,7 @@ _integration_cache: dict[type[SolverIntegration], SolverIntegration] = {}
 def configure(
     *,
     disable: bool,
-    solvers: Iterable[str] | None,
+    libraries: Iterable[str] | None,
     log_solver_parameters: bool,
     log_solver_metrics: bool,
     log_artifacts: bool,
@@ -43,7 +43,7 @@ def configure(
 
     integrations: list[SolverIntegration] = []
     if not disable:
-        integrations = _resolve_integrations(solvers)
+        integrations = _resolve_integrations(libraries)
 
     if _autolog_manager is None:
         from mlflow_optimization.features.autolog.service import AutologManager
@@ -81,23 +81,27 @@ def configure(
     _autolog_manager.enable(integrations)
 
 
-def _resolve_integrations(solvers: Iterable[str] | None) -> list[SolverIntegration]:
+def _resolve_integrations(libraries: Iterable[str] | None) -> list[SolverIntegration]:
     """The selected solver integrations."""
-    module_names: dict[str, tuple[str, str]] = dict(INTEGRATION_MODULES)
-    selected_names: tuple[str, ...] = (
-        tuple(module_names) if solvers is None else tuple(dict.fromkeys(solvers))
+    library_modules: dict[str, tuple[str, str]] = dict(INTEGRATION_MODULES)
+    selected_libraries: tuple[str, ...] = (
+        tuple(library_modules)
+        if libraries is None
+        else tuple(dict.fromkeys(libraries))
     )
 
-    for solver_name in selected_names:
-        if solver_name not in module_names:
-            valid_names: str = ", ".join(module_names)
-            raise ValueError(f"Unknown solver {solver_name!r}. Valid names: {valid_names}")
+    for library_name in selected_libraries:
+        if library_name not in library_modules:
+            valid_library_names: str = ", ".join(library_modules)
+            raise ValueError(
+                f"Unknown library {library_name!r}. Valid names: {valid_library_names}"
+            )
 
     integrations: list[SolverIntegration] = []
-    for solver_name in selected_names:
+    for library_name in selected_libraries:
         module_name: str
         class_name: str
-        module_name, class_name = module_names[solver_name]
+        module_name, class_name = library_modules[library_name]
         try:
             integration_module: ModuleType = import_module(module_name)
             integration_class: type[SolverIntegration] = getattr(
@@ -112,7 +116,7 @@ def _resolve_integrations(solvers: Iterable[str] | None) -> list[SolverIntegrati
                 integration = integration_class()
                 _integration_cache[integration_class] = integration
         except ImportError:
-            if solvers is not None:
+            if libraries is not None:
                 raise
             continue
         integrations.append(integration)

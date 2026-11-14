@@ -31,7 +31,7 @@ def _set_time_limit_after_incumbent(
 
 
 def test_optimal_mip_is_recorded(tracking: Tracking) -> None:
-    autolog(solvers=["gurobipy"])
+    autolog(libraries=["gurobipy"])
     model: gurobipy.Model = _new_model()
     variable: gurobipy.Var = model.addVar(vtype=gurobipy.GRB.BINARY)
     model.addConstr(variable >= 1)
@@ -50,7 +50,7 @@ def test_optimal_mip_is_recorded(tracking: Tracking) -> None:
 def test_failed_call_after_success_does_not_record_stale_results(
     tracking: Tracking,
 ) -> None:
-    autolog(solvers=["gurobipy"])
+    autolog(libraries=["gurobipy"])
     model: gurobipy.Model = _new_model()
     variable: gurobipy.Var = model.addVar(vtype=gurobipy.GRB.BINARY)
     model.setObjective(variable, gurobipy.GRB.MAXIMIZE)
@@ -75,7 +75,7 @@ def test_failed_call_after_success_does_not_record_stale_results(
 def test_limited_mip_bound_has_correct_direction(
     tracking: Tracking, sense: int
 ) -> None:
-    autolog(solvers=["gurobipy"])
+    autolog(libraries=["gurobipy"])
     model: gurobipy.Model = _new_model()
     model.Params.Presolve = 0
     model.Params.NodeLimit = 1
@@ -110,7 +110,7 @@ def test_limited_mip_bound_has_correct_direction(
 
 
 def test_infeasible_mip_has_no_objective_value(tracking: Tracking) -> None:
-    autolog(solvers=["gurobipy"])
+    autolog(libraries=["gurobipy"])
     model: gurobipy.Model = _new_model()
     variable: gurobipy.Var = model.addVar(vtype=gurobipy.GRB.BINARY)
     model.addConstr(variable >= 1)
@@ -127,7 +127,7 @@ def test_infeasible_mip_has_no_objective_value(tracking: Tracking) -> None:
 
 
 def test_unbounded_status_is_recorded(tracking: Tracking) -> None:
-    autolog(solvers=["gurobipy"])
+    autolog(libraries=["gurobipy"])
     model: gurobipy.Model = _new_model()
     variable: gurobipy.Var = model.addVar(lb=-gurobipy.GRB.INFINITY)
     model.setObjective(variable, gurobipy.GRB.MAXIMIZE)
@@ -146,7 +146,7 @@ def test_unbounded_status_is_recorded(tracking: Tracking) -> None:
 def test_infeasible_or_unbounded_status_is_not_resolved_by_guessing(
     tracking: Tracking,
 ) -> None:
-    autolog(solvers=["gurobipy"])
+    autolog(libraries=["gurobipy"])
     model: gurobipy.Model = _new_model()
     variable: gurobipy.Var = model.addVar(lb=-gurobipy.GRB.INFINITY)
     model.addConstr(variable >= 1)
@@ -170,7 +170,7 @@ def test_infeasible_or_unbounded_status_is_not_resolved_by_guessing(
 def test_time_limit_without_solution_does_not_invent_objective(
     tracking: Tracking,
 ) -> None:
-    autolog(solvers=["gurobipy"])
+    autolog(libraries=["gurobipy"])
     model: gurobipy.Model = _new_model()
     model.Params.TimeLimit = 0.0
     variable: gurobipy.Var = model.addVar(vtype=gurobipy.GRB.BINARY)
@@ -191,7 +191,7 @@ def test_time_limit_without_solution_does_not_invent_objective(
 
 
 def test_time_limit_with_incumbent_keeps_objective(tracking: Tracking) -> None:
-    autolog(solvers=["gurobipy"])
+    autolog(libraries=["gurobipy"])
     model: gurobipy.Model = _new_model()
     model.Params.TimeLimit = 10.0
     variables: gurobipy.tupledict[int, gurobipy.Var] = model.addVars(
@@ -226,7 +226,7 @@ def test_time_limit_with_incumbent_keeps_objective(tracking: Tracking) -> None:
 def test_objective_and_bound_follow_sense(
     tracking: Tracking, sense: int, sense_name: str
 ) -> None:
-    autolog(solvers=["gurobipy"])
+    autolog(libraries=["gurobipy"])
     model: gurobipy.Model = _new_model()
     first_variable: gurobipy.Var = model.addVar(vtype=gurobipy.GRB.BINARY)
     second_variable: gurobipy.Var = model.addVar(vtype=gurobipy.GRB.BINARY)
@@ -249,7 +249,7 @@ def test_objective_and_bound_follow_sense(
 def test_explicit_parameter_is_recorded_without_paths_or_secrets(
     tracking: Tracking, tmp_path: Path
 ) -> None:
-    autolog(solvers=["gurobipy"])
+    autolog(libraries=["gurobipy"])
     log_file: Path = tmp_path / "gurobi.log"
     secret: str = "acceptance-test-secret"
     with gurobipy.Env(empty=True) as environment:

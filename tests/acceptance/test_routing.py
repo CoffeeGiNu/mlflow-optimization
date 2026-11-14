@@ -28,7 +28,7 @@ DISTANCE_MATRIX: tuple[tuple[int, ...], ...] = (
 def test_routing_unsuccessful_statuses(
     tracking: Tracking, scenario: str, termination: str
 ) -> None:
-    autolog(solvers=["routing"])
+    autolog(libraries=["routing"])
     manager: pywrapcp.RoutingIndexManager = pywrapcp.RoutingIndexManager(4, 1, 0)
     model: pywrapcp.RoutingModel = pywrapcp.RoutingModel(manager)
     parameters: routing_parameters_pb2.RoutingSearchParameters = (
@@ -52,7 +52,7 @@ def test_routing_unsuccessful_statuses(
 def test_routing_fast_failed_assignment_is_not_recorded_as_a_solution(
     tracking: Tracking,
 ) -> None:
-    autolog(solvers=["routing"])
+    autolog(libraries=["routing"])
     routing_index_manager: pywrapcp.RoutingIndexManager = pywrapcp.RoutingIndexManager(
         6, 1, 0
     )
@@ -112,7 +112,7 @@ def test_routing_fast_failed_assignment_is_not_recorded_as_a_solution(
 
 
 def test_repeated_routing_solves_record_counter_deltas(tracking: Tracking) -> None:
-    autolog(solvers=["routing"])
+    autolog(libraries=["routing"])
     manager: pywrapcp.RoutingIndexManager = pywrapcp.RoutingIndexManager(4, 1, 0)
     model: pywrapcp.RoutingModel = pywrapcp.RoutingModel(manager)
     parameters: routing_parameters_pb2.RoutingSearchParameters = (
@@ -146,7 +146,7 @@ def test_routing_solve_records_meaningful_results(
     tracking: Tracking,
     vehicle_count: int,
 ) -> None:
-    autolog(solvers=["routing"])
+    autolog(libraries=["routing"])
 
     assignment: pywrapcp.Assignment | None = _solve_routing_problem(vehicle_count)
 
@@ -201,7 +201,7 @@ def test_requested_route_artifact_is_attached_only_to_its_solve(
     tracking: Tracking,
     tmp_path: Path,
 ) -> None:
-    autolog(solvers=["routing"])
+    autolog(libraries=["routing"])
 
     first_assignment: pywrapcp.Assignment | None = _solve_routing_problem(1)
     second_assignment: pywrapcp.Assignment | None = _solve_routing_problem(2)

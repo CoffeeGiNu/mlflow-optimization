@@ -102,7 +102,7 @@ def test_highs_optimal_run_records_objective_direction(
     objective_sense: Any,
     expected_sense: str,
 ) -> None:
-    autolog(solvers=["pyomo"])
+    autolog(libraries=["pyomo"])
     solver: Any = _solver_or_skip("highs")
     model: Any = _bounded_model(objective_sense)
 
@@ -130,7 +130,7 @@ def test_highs_optimal_run_records_objective_direction(
 def test_highs_node_limit_records_nonzero_gap(
     tracking: Any, maximize_sense: bool
 ) -> None:
-    autolog(solvers=["pyomo"])
+    autolog(libraries=["pyomo"])
     solver: Any = _solver_or_skip("appsi_highs")
     solver.highs_options["presolve"] = "off"
     solver.highs_options["mip_max_nodes"] = 1
@@ -175,7 +175,7 @@ def test_highs_node_limit_records_nonzero_gap(
 
 
 def test_highs_infeasible_run_has_no_objective_or_gap(tracking: Any) -> None:
-    autolog(solvers=["pyomo"])
+    autolog(libraries=["pyomo"])
     solver: Any = _solver_or_skip("highs")
     model: Any = ConcreteModel()
     model.value = Var()
@@ -199,7 +199,7 @@ def test_highs_infeasible_run_has_no_objective_or_gap(tracking: Any) -> None:
 def test_highs_objective_free_run_marks_objective_metrics_undefined(
     tracking: Any,
 ) -> None:
-    autolog(solvers=["pyomo"])
+    autolog(libraries=["pyomo"])
     solver: Any = _solver_or_skip("highs")
     model: Any = ConcreteModel()
     model.value = Var(bounds=(0, 1))
@@ -223,7 +223,7 @@ def test_highs_objective_free_run_marks_objective_metrics_undefined(
 
 
 def test_appsi_gurobi_records_native_solve_time(tracking: Any) -> None:
-    autolog(solvers=["pyomo"])
+    autolog(libraries=["pyomo"])
     solver: Any = _solver_or_skip("appsi_gurobi")
     model: Any = _bounded_model(minimize)
 
@@ -234,7 +234,7 @@ def test_appsi_gurobi_records_native_solve_time(tracking: Any) -> None:
 
 
 def test_appsi_highs_replaced_native_solver_records_its_own_time(tracking: Any) -> None:
-    autolog(solvers=["pyomo"])
+    autolog(libraries=["pyomo"])
     solver: Any = _solver_or_skip("appsi_highs")
     first_model: Any = _bounded_model(minimize)
     second_model: Any = _bounded_model(maximize)
@@ -252,7 +252,7 @@ def test_appsi_highs_replaced_native_solver_records_its_own_time(tracking: Any) 
 
 
 def test_gurobi_direct_overlap_records_one_pyomo_run(tracking: Any) -> None:
-    autolog(solvers=["pyomo", "gurobipy"])
+    autolog(libraries=["pyomo", "gurobipy"])
     solver: Any = _solver_or_skip("gurobi_direct")
     model: Any = _bounded_model(minimize)
 
@@ -287,7 +287,7 @@ mlflow.set_tracking_uri(sys.argv[1])
 mlflow.set_experiment("late-pyomo-solver-test")
 from mlflow_optimization import autolog
 
-autolog(solvers=["pyomo"])
+autolog(libraries=["pyomo"])
 
 from pyomo.contrib.solver.solvers.gurobi.gurobi_persistent import GurobiPersistent
 import pyomo.environ as pyomo
@@ -321,7 +321,7 @@ autolog(disable=True)
 
 
 def test_gurobi_direct_solution_limit_records_real_incumbent(tracking: Any) -> None:
-    autolog(solvers=["pyomo"])
+    autolog(libraries=["pyomo"])
     solver: Any = _solver_or_skip("gurobi_direct")
     solver.options["SolutionLimit"] = 1
     solver.options["Presolve"] = 0
@@ -362,7 +362,7 @@ def test_shell_gurobi_credentials_are_not_recorded_when_solve_raises(
     tracking: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    autolog(solvers=["pyomo"])
+    autolog(libraries=["pyomo"])
     solver: Any = SolverFactory("gurobi")
     wls_secret: str = "dummy-wls-secret"
     server_password: str = "dummy-server-password"
@@ -439,7 +439,7 @@ def test_legacy_solution_entry_status_controls_feasibility(
     expected_has_solution: str,
     expected_termination: str,
 ) -> None:
-    autolog(solvers=["pyomo"])
+    autolog(libraries=["pyomo"])
     solver: Any = SolverFactory("gurobi")
     result: SolverResults = SolverResults()
     solver_information: Any = result.solver.add()

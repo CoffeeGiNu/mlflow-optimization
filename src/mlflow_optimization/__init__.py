@@ -13,7 +13,7 @@ __all__ = ["MlflowOptimizationWarning", "SolveRun", "autolog", "context", "last_
 def autolog(
     disable: bool = False,
     *,
-    solvers: Iterable[str] | None = None,
+    libraries: Iterable[str] | None = None,
     log_solver_parameters: bool = True,
     log_solver_metrics: bool = True,
     log_artifacts: bool = True,
@@ -21,7 +21,7 @@ def autolog(
     """Switch automatic logging of solves on, off, or to a new configuration."""
     _bootstrap.configure(
         disable=disable,
-        solvers=solvers,
+        libraries=libraries,
         log_solver_parameters=log_solver_parameters,
         log_solver_metrics=log_solver_metrics,
         log_artifacts=log_artifacts,

@@ -33,7 +33,7 @@ def _assert_missing_reason(run: Run, metric_name: str, reason: str) -> None:
 
 
 def test_optimal_mip_records_solution_metrics_and_engine(tracking: Tracking) -> None:
-    autolog(solvers=["pyscipopt"])
+    autolog(libraries=["pyscipopt"])
     model: Model = Model()
     variable: Any = model.addVar("decision", vtype="B")
     model.setObjective(variable, "maximize")
@@ -57,7 +57,7 @@ def test_optimal_mip_records_solution_metrics_and_engine(tracking: Tracking) -> 
 
 
 def test_infeasible_mip_records_no_solution_reasons(tracking: Tracking) -> None:
-    autolog(solvers=["pyscipopt"])
+    autolog(libraries=["pyscipopt"])
     model: Model = Model()
     variable: Any = model.addVar("decision", vtype="B")
     model.setObjective(variable, "maximize")
@@ -73,7 +73,7 @@ def test_infeasible_mip_records_no_solution_reasons(tracking: Tracking) -> None:
 
 
 def test_unbounded_model_records_unbounded_termination(tracking: Tracking) -> None:
-    autolog(solvers=["pyscipopt"])
+    autolog(libraries=["pyscipopt"])
     model: Model = Model()
     variable: Any = model.addVar("decision", vtype="C")
     model.setObjective(variable, "maximize")
@@ -89,7 +89,7 @@ def test_unbounded_model_records_unbounded_termination(tracking: Tracking) -> No
 def test_time_limit_without_solution_records_missing_objective(
     tracking: Tracking,
 ) -> None:
-    autolog(solvers=["pyscipopt"])
+    autolog(libraries=["pyscipopt"])
     model: Model = Model()
     variable: Any = model.addVar("decision", vtype="B")
     model.setObjective(variable, "maximize")
@@ -104,7 +104,7 @@ def test_time_limit_without_solution_records_missing_objective(
 
 
 def test_time_limit_with_solution_keeps_objective(tracking: Tracking) -> None:
-    autolog(solvers=["pyscipopt"])
+    autolog(libraries=["pyscipopt"])
     model: Model = Model()
     variable: Any = model.addVar("decision", vtype="B")
     model.setObjective(variable, "maximize")
@@ -125,7 +125,7 @@ def test_time_limit_with_solution_keeps_objective(tracking: Tracking) -> None:
 def test_objective_bound_direction_matches_sense(
     tracking: Tracking, sense: str
 ) -> None:
-    autolog(solvers=["pyscipopt"])
+    autolog(libraries=["pyscipopt"])
     model: Model = Model()
     variable: Any = model.addVar("decision", vtype="B")
     model.setObjective(variable, sense)
@@ -144,7 +144,7 @@ def test_objective_bound_direction_matches_sense(
 
 @pytest.mark.parametrize("maximize", (False, True))
 def test_node_limit_records_nonzero_gap(tracking: Tracking, maximize: bool) -> None:
-    autolog(solvers=["pyscipopt"])
+    autolog(libraries=["pyscipopt"])
     model: Model = Model()
     model.hideOutput()
     model.setPresolve(SCIP_PARAMSETTING.OFF)
@@ -185,7 +185,7 @@ def test_node_limit_records_nonzero_gap(tracking: Tracking, maximize: bool) -> N
 
 
 def test_explicit_solver_parameter_is_recorded(tracking: Tracking) -> None:
-    autolog(solvers=["pyscipopt"])
+    autolog(libraries=["pyscipopt"])
     model: Model = Model()
     variable: Any = model.addVar("decision", vtype="B")
     model.setObjective(variable, "maximize")
@@ -198,7 +198,7 @@ def test_explicit_solver_parameter_is_recorded(tracking: Tracking) -> None:
 
 
 def test_free_transform_starts_new_solver_counters(tracking: Tracking) -> None:
-    autolog(solvers=["pyscipopt"])
+    autolog(libraries=["pyscipopt"])
     model: Model = Model()
     model.hideOutput()
     variable: Any = model.addVar("decision", vtype="B")
@@ -219,7 +219,7 @@ def test_free_transform_starts_new_solver_counters(tracking: Tracking) -> None:
 
 
 def test_unhashable_model_still_solves_and_records(tracking: Tracking) -> None:
-    autolog(solvers=["pyscipopt"])
+    autolog(libraries=["pyscipopt"])
 
     class UnhashableModel(Model):
         __hash__: None = None
@@ -241,7 +241,7 @@ def test_unhashable_model_still_solves_and_records(tracking: Tracking) -> None:
 
 
 def test_model_imported_before_autolog_is_observed(tracking: Tracking) -> None:
-    autolog(solvers=["pyscipopt"])
+    autolog(libraries=["pyscipopt"])
     model: Model = Model()
     variable: Any = model.addVar("decision", vtype="B")
     model.setObjective(variable, "maximize")
@@ -252,7 +252,7 @@ def test_model_imported_before_autolog_is_observed(tracking: Tracking) -> None:
 
 
 def test_disabled_autolog_does_not_record_solves(tracking: Tracking) -> None:
-    autolog(solvers=["pyscipopt"])
+    autolog(libraries=["pyscipopt"])
     autolog(disable=True)
     model: Model = Model()
     variable: Any = model.addVar("decision", vtype="B")
@@ -268,7 +268,7 @@ def test_disable_preserves_a_user_model_subclass_binding(tracking: Tracking) -> 
 
     original_model: type[Any] = Model
     try:
-        autolog(solvers=["pyscipopt"])
+        autolog(libraries=["pyscipopt"])
 
         class Model(Model):
             """A user-defined PySCIPOpt model."""

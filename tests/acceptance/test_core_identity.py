@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 def test_thirty_solves_keep_their_instance_and_parameters(tracking: Tracking) -> None:
     from fakes import FakeSolver
 
-    autolog(solvers=["fake"])
+    autolog(libraries=["fake"])
     parameter_settings: tuple[tuple[int, float], ...] = (
         (1, 0.1),
         (2, 0.2),
@@ -70,7 +70,7 @@ def test_active_user_run_is_preserved_and_parent_of_solve_run(
 ) -> None:
     from fakes import FakeSolver
 
-    autolog(solvers=["fake"])
+    autolog(libraries=["fake"])
     mlflow.start_run(run_name="user-parent")
     parent_run_before: ActiveRun | None = mlflow.active_run()
     assert parent_run_before is not None
@@ -115,7 +115,7 @@ def test_nested_solver_entry_points_record_only_the_outer_api(
     from fakes import FakeSolver
     from fakes_frontend import FakeFrontend
 
-    autolog(solvers=["fake", "fake_frontend"])
+    autolog(libraries=["fake", "fake_frontend"])
     frontend: FakeFrontend = FakeFrontend(FakeSolver())
     result: str = frontend.solve()
 
@@ -130,7 +130,7 @@ def test_nested_solver_entry_points_record_only_the_outer_api(
 def test_parallel_thread_solves_are_recorded_separately(tracking: Tracking) -> None:
     from fakes import FakeSolver
 
-    autolog(solvers=["fake"])
+    autolog(libraries=["fake"])
     worker_count: int = 4
     start_barrier: Barrier = Barrier(worker_count)
 
@@ -208,7 +208,7 @@ def test_inherited_async_task_observes_solves_after_outer_solve_ends(
             return original_solve(solver)
 
         monkeypatch.setattr(FakeSolver, "solve", schedule_task_during_solve)
-        autolog(solvers=["fake"])
+        autolog(libraries=["fake"])
         try:
             outer_result: str = FakeSolver().solve()
             assert inherited_task is not None

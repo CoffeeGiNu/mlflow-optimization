@@ -91,7 +91,7 @@ print(f"SOLVED_API={solved_api or ''}")
 api_name: str
 for api_name in blocked_apis:
     try:
-        autolog(solvers=[api_name])
+        autolog(libraries=[api_name])
     except ImportError:
         continue
     raise AssertionError(f"Blocked solver API {api_name!r} did not raise ImportError.")

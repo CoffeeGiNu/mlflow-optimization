@@ -62,7 +62,7 @@ def _single_solve_run(tracking: Tracking) -> Run:
 
 
 def test_optimal_linear_problem_is_recorded(tracking: Tracking) -> None:
-    autolog(solvers=["mathopt"])
+    autolog(libraries=["mathopt"])
     _solve(_make_bounded_model(), SolverType.GLOP)
 
     run: Run = _single_solve_run(tracking)
@@ -76,7 +76,7 @@ def test_optimal_linear_problem_is_recorded(tracking: Tracking) -> None:
 
 
 def test_optimal_mixed_integer_problem_is_recorded(tracking: Tracking) -> None:
-    autolog(solvers=["mathopt"])
+    autolog(libraries=["mathopt"])
     _solve(_make_bounded_model(integer=True), SolverType.GSCIP)
 
     run: Run = _single_solve_run(tracking)
@@ -90,7 +90,7 @@ def test_optimal_mixed_integer_problem_is_recorded(tracking: Tracking) -> None:
 
 
 def test_infeasible_problem_records_no_objective_value(tracking: Tracking) -> None:
-    autolog(solvers=["mathopt"])
+    autolog(libraries=["mathopt"])
     _solve(_make_infeasible_model(), SolverType.GLOP)
 
     run: Run = _single_solve_run(tracking)
@@ -104,7 +104,7 @@ def test_infeasible_problem_records_no_objective_value(tracking: Tracking) -> No
 def test_unbounded_problem_keeps_feasible_solution_and_omits_infinite_bound(
     tracking: Tracking,
 ) -> None:
-    autolog(solvers=["mathopt"])
+    autolog(libraries=["mathopt"])
     _solve(_make_unbounded_model(), SolverType.GSCIP)
 
     run: Run = _single_solve_run(tracking)
@@ -125,7 +125,7 @@ def test_objective_and_bound_follow_objective_direction(
     maximize: bool,
     expected_sense: str,
 ) -> None:
-    autolog(solvers=["mathopt"])
+    autolog(libraries=["mathopt"])
     _solve(_make_bounded_model(maximize=maximize), SolverType.GLOP)
 
     run: Run = _single_solve_run(tracking)
@@ -141,7 +141,7 @@ def test_objective_and_bound_follow_objective_direction(
 
 @pytest.mark.parametrize("maximize", (False, True))
 def test_node_limit_records_nonzero_gap(tracking: Tracking, maximize: bool) -> None:
-    autolog(solvers=["mathopt"])
+    autolog(libraries=["mathopt"])
     model: Model = Model()
     variables: list[Variable] = [
         model.add_binary_variable(name=f"value_{index}") for index in range(60)
@@ -194,7 +194,7 @@ def test_node_limit_records_nonzero_gap(tracking: Tracking, maximize: bool) -> N
 def test_different_mathopt_backends_have_distinct_engine_tags(
     tracking: Tracking,
 ) -> None:
-    autolog(solvers=["mathopt"])
+    autolog(libraries=["mathopt"])
     _solve(_make_bounded_model(), SolverType.GLOP)
     _solve(_make_bounded_model(), SolverType.PDLP)
 
@@ -213,7 +213,7 @@ def test_different_mathopt_backends_have_distinct_engine_tags(
 def test_backend_without_branch_and_bound_nodes_marks_statistic_missing(
     tracking: Tracking,
 ) -> None:
-    autolog(solvers=["mathopt"])
+    autolog(libraries=["mathopt"])
     _solve(_make_bounded_model(), SolverType.GLOP)
 
     run: Run = _single_solve_run(tracking)
@@ -231,7 +231,7 @@ def test_disable_preserves_a_reassigned_solve_name(tracking: Tracking) -> None:
         return None
 
     try:
-        autolog(solvers=["mathopt"])
+        autolog(libraries=["mathopt"])
         solve = user_solve
 
         autolog(disable=True)

@@ -19,7 +19,7 @@ class SolutionCounter(cp_model.CpSolverSolutionCallback):
 
 
 def test_cp_sat_records_an_optimal_optimization(tracking: Any) -> None:
-    autolog(solvers=["cp_sat"])
+    autolog(libraries=["cp_sat"])
     model: cp_model.CpModel = cp_model.CpModel()
     first: cp_model.IntVar = model.new_int_var(0, 10, "first")
     second: cp_model.IntVar = model.new_int_var(0, 10, "second")
@@ -45,7 +45,7 @@ def test_cp_sat_records_an_optimal_optimization(tracking: Any) -> None:
 
 
 def test_cp_sat_records_genuine_zero_objective_and_bound(tracking: Any) -> None:
-    autolog(solvers=["cp_sat"])
+    autolog(libraries=["cp_sat"])
     model: cp_model.CpModel = cp_model.CpModel()
     value: cp_model.IntVar = model.new_int_var(0, 5, "value")
     model.minimize(value)
@@ -63,7 +63,7 @@ def test_cp_sat_records_genuine_zero_objective_and_bound(tracking: Any) -> None:
 
 
 def test_cp_sat_records_an_infeasible_optimization(tracking: Any) -> None:
-    autolog(solvers=["cp_sat"])
+    autolog(libraries=["cp_sat"])
     model: cp_model.CpModel = cp_model.CpModel()
     value: cp_model.IntVar = model.new_bool_var("value")
     model.add(value == 0)
@@ -91,7 +91,7 @@ def test_cp_sat_records_an_infeasible_optimization(tracking: Any) -> None:
 
 
 def test_cp_sat_deterministic_limit_keeps_zero_incumbent(tracking: Any) -> None:
-    autolog(solvers=["cp_sat"])
+    autolog(libraries=["cp_sat"])
     model: cp_model.CpModel = cp_model.CpModel()
     variables: list[cp_model.IntVar] = [
         model.new_bool_var(f"item_{index}") for index in range(60)
@@ -131,7 +131,7 @@ def test_cp_sat_deterministic_limit_keeps_zero_incumbent(tracking: Any) -> None:
 
 
 def test_cp_sat_zero_time_limit_has_no_solution(tracking: Any) -> None:
-    autolog(solvers=["cp_sat"])
+    autolog(libraries=["cp_sat"])
     model: cp_model.CpModel = cp_model.CpModel()
     value: cp_model.IntVar = model.new_int_var(-10, -5, "value")
     model.minimize(value)
@@ -151,7 +151,7 @@ def test_cp_sat_zero_time_limit_has_no_solution(tracking: Any) -> None:
 def test_cp_sat_records_objective_less_sat_and_unsat_models(
     tracking: Any,
 ) -> None:
-    autolog(solvers=["cp_sat"])
+    autolog(libraries=["cp_sat"])
     cases: tuple[tuple[bool, str, str], ...] = (
         (True, "feasible", "true"),
         (False, "infeasible", "false"),
@@ -199,7 +199,7 @@ def test_cp_sat_records_objective_less_sat_and_unsat_models(
 def test_cp_sat_branches_and_conflicts_use_native_metric_names(
     tracking: Any,
 ) -> None:
-    autolog(solvers=["cp_sat"])
+    autolog(libraries=["cp_sat"])
     model: cp_model.CpModel = cp_model.CpModel()
     first: cp_model.IntVar = model.new_bool_var("first")
     second: cp_model.IntVar = model.new_bool_var("second")
@@ -220,7 +220,7 @@ def test_cp_sat_branches_and_conflicts_use_native_metric_names(
 def test_cp_sat_legacy_solve_alias_records_once_and_calls_user_callback(
     tracking: Any,
 ) -> None:
-    autolog(solvers=["cp_sat"])
+    autolog(libraries=["cp_sat"])
     model: cp_model.CpModel = cp_model.CpModel()
     value: cp_model.IntVar = model.new_bool_var("value")
     model.add(value == 1)
