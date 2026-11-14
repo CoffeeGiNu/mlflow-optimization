@@ -2,7 +2,7 @@
 
 Automatic MLflow logging of mathematical optimization solves.
 
-Supported solvers: [gurobipy, PySCIPOpt, Pyomo, OR-Tools (MathOpt, CP-SAT, Routing)]
+Supported libraries: [gurobipy, PySCIPOpt, Pyomo, OR-Tools (MathOpt, CP-SAT, Routing)]
 
 ## install
 
