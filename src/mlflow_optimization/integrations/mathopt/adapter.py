@@ -1,10 +1,11 @@
 """The MathOpt solver integration."""
 
 import dataclasses
-import math
 from collections.abc import Callable, Mapping
 from datetime import timedelta
 from enum import Enum
+from functools import wraps
+from inspect import Signature, signature
 from typing import cast
 
 import ortools
@@ -80,37 +81,14 @@ class Integration:
         original_solve: Callable[..., SolveResult] = cast(
             Callable[..., SolveResult], original
         )
-        if entry_point == "incremental":
 
-            def wrapped_incremental_solve(
-                incremental_solver: mathopt_solve.IncrementalSolver,
-                *call_arguments: object,
-                **call_keywords: object,
-            ) -> SolveResult:
-                def call() -> SolveResult:
-                    return original_solve(
-                        incremental_solver, *call_arguments, **call_keywords
-                    )
-
-                def extract(
-                    result: SolveResult | None,
-                    error: BaseException | None,
-                ) -> SolveObservation:
-                    return self._extract(
-                        result,
-                        error,
-                        entry_point,
-                        (incremental_solver, *call_arguments),
-                        cast(dict[str, object], call_keywords),
-                    )
-
-                return observer.observe(self.api, call, extract)
-
-            return wrapped_incremental_solve
-
+        @wraps(original_solve)
         def wrapped_solve(
             *call_arguments: object, **call_keywords: object
         ) -> SolveResult:
+            call_signature: Signature = signature(original_solve)
+            call_signature.bind(*call_arguments, **call_keywords)
+
             def call() -> SolveResult:
                 return original_solve(*call_arguments, **call_keywords)
 
@@ -182,8 +160,10 @@ class Integration:
     ) -> SolverType | None:
         """The solver type supplied to a MathOpt entry point."""
         if entry_point == "incremental":
-            incremental_solver: object | None = (
-                call_arguments[0] if call_arguments else None
+            incremental_solver: object = (
+                call_arguments[0]
+                if call_arguments
+                else call_keywords.get("self", _UNAVAILABLE)
             )
             solver_type: object = self._guarded_attribute(
                 incremental_solver, "_solver_type"
@@ -202,8 +182,10 @@ class Integration:
     ) -> Model | None:
         """The model supplied to a MathOpt entry point."""
         if entry_point == "incremental":
-            incremental_solver: object | None = (
-                call_arguments[0] if call_arguments else None
+            incremental_solver: object = (
+                call_arguments[0]
+                if call_arguments
+                else call_keywords.get("self", _UNAVAILABLE)
             )
             model: object = self._guarded_attribute(incremental_solver, "_model")
             return model if isinstance(model, Model) else None
@@ -393,7 +375,7 @@ class Integration:
         except ValueError:
             return MissingReason.FAILED
         if isinstance(value, (int, float)):
-            return self._normalize_infinity(float(value))
+            return float(value)
         return MissingReason.FAILED
 
     def _numeric_result_value(
@@ -410,7 +392,7 @@ class Integration:
         except (AttributeError, RuntimeError):
             return MissingReason.FAILED
         if isinstance(value, (int, float)):
-            return self._normalize_infinity(float(value))
+            return float(value)
         return MissingReason.FAILED
 
     def _solver_time(self, result: SolveResult) -> float | MissingReason:
@@ -504,9 +486,7 @@ class Integration:
         )
         field_descriptor: object
         field_value: object
-        for field_descriptor, field_value in cast(
-            list[tuple[object, object]], fields
-        ):
+        for field_descriptor, field_value in cast(list[tuple[object, object]], fields):
             field_name: object = self._guarded_attribute(field_descriptor, "name")
             if (
                 isinstance(field_name, str)
@@ -628,7 +608,7 @@ class Integration:
                 field_value, bool
             ):
                 native_name: str = f"{prefix}.{field_name}"
-                native[native_name] = self._normalize_infinity(float(field_value))
+                native[native_name] = float(field_value)
 
     def _metadata(
         self,
@@ -886,15 +866,3 @@ class Integration:
             return getattr(attribute_owner, attribute_name)
         except (AttributeError, RuntimeError, StatusNotOk):
             return _UNAVAILABLE
-
-    def _normalize_infinity(self, value: float) -> float:
-        """The floating value of a MathOpt metric after sentinel normalization."""
-        if math.isinf(value):
-            return value
-        positive_sentinels: tuple[float, ...] = (1e20, 1e98, 1e100, float(2**63 - 1))
-        negative_sentinels: tuple[float, ...] = (-1e20, -1e98, -1e100, float(-(2**63)))
-        if value in positive_sentinels:
-            return math.inf
-        if value in negative_sentinels:
-            return -math.inf
-        return value
