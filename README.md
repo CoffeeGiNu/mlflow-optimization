@@ -37,4 +37,4 @@ if run is not None:
 
 ## License
 
-Licensed under MIT OR Apache-2.0.
+Either of Apache License 2.0 or MIT license, at your option.
