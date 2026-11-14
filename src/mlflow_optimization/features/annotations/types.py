@@ -14,8 +14,8 @@ class Annotation:
 
 
 @dataclass(frozen=True)
-class KpiEntry:
-    """One user KPI under final key names."""
+class UserMetric:
+    """One user metric under final key names."""
 
     metric_key: str
     value: float

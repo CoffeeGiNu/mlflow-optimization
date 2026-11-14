@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from mlflow_optimization.features.autolog.ports import SolverIntegration
     from mlflow_optimization.features.autolog.service import AutologManager
-    from mlflow_optimization.features.runs.models import RecordOptions
+    from mlflow_optimization.features.runs.types import RecordOptions
     from mlflow_optimization.features.runs.record import RecordSolve
     from mlflow_optimization.integrations.mlflow.artifacts import MlflowArtifactStore
     from mlflow_optimization.integrations.mlflow.runs import MlflowRunStore
@@ -30,7 +30,7 @@ def configure(
     *,
     disable: bool,
     solvers: Iterable[str] | None,
-    log_params: bool,
+    log_solver_parameters: bool,
     log_solver_metrics: bool,
     log_artifacts: bool,
 ) -> None:
@@ -46,7 +46,7 @@ def configure(
 
     if _autolog_manager is None:
         from mlflow_optimization.features.autolog.service import AutologManager
-        from mlflow_optimization.features.runs.models import RecordOptions
+        from mlflow_optimization.features.runs.types import RecordOptions
         from mlflow_optimization.features.runs.record import RecordSolve
         from mlflow_optimization.integrations.mlflow.artifacts import MlflowArtifactStore
         from mlflow_optimization.integrations.mlflow.runs import MlflowRunStore
@@ -54,7 +54,7 @@ def configure(
         run_store: MlflowRunStore = MlflowRunStore()
         artifact_store: MlflowArtifactStore = MlflowArtifactStore()
         record_options: RecordOptions = RecordOptions(
-            log_params=log_params,
+            log_solver_parameters=log_solver_parameters,
             log_solver_metrics=log_solver_metrics,
             log_artifacts=log_artifacts,
         )
@@ -67,7 +67,7 @@ def configure(
         _autolog_manager = autolog_manager
     else:
         assert _record_solve is not None
-        _record_solve.options.log_params = log_params
+        _record_solve.options.log_solver_parameters = log_solver_parameters
         _record_solve.options.log_solver_metrics = log_solver_metrics
         _record_solve.options.log_artifacts = log_artifacts
 

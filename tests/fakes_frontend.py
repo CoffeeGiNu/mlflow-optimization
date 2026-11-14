@@ -4,18 +4,18 @@ from collections.abc import Callable
 
 from fakes import FakeSolver
 from mlflow_optimization.common.patching import Patch
-from mlflow_optimization.features.autolog.models import SolveObservation
+from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.autolog.ports import SolveObserver
-from mlflow_optimization.features.metadata.models import ReportedMetadata, SolverParameter
-from mlflow_optimization.features.metrics.models import (
+from mlflow_optimization.features.metadata.types import ReportedMetadata, SolverParameter
+from mlflow_optimization.features.metrics.types import (
     MissingReason,
     ObjectiveSense,
     ReportedMetrics,
 )
-from mlflow_optimization.features.outcomes.models import ReportedOutcome, Termination
+from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
 
 
-class FakeModelingLayer:
+class FakeFrontend:
     """A modeling layer that delegates solving to a fake solver."""
 
     def __init__(self, solver: FakeSolver) -> None:
@@ -29,10 +29,10 @@ class FakeModelingLayer:
 class Integration:
     """The adapter for the fake modeling-layer API."""
 
-    api: str = "fake_layer"
+    api: str = "fake_frontend"
 
     def __init__(self) -> None:
-        self._patch: Patch = Patch(FakeModelingLayer, "solve")
+        self._patch: Patch = Patch(FakeFrontend, "solve")
         self._observer: SolveObserver | None = None
 
     def install(self, observer: SolveObserver) -> None:
@@ -40,9 +40,9 @@ class Integration:
         self._observer = observer
 
         def factory(
-            original: Callable[[FakeModelingLayer], str],
-        ) -> Callable[[FakeModelingLayer], str]:
-            def observed(modeling_layer: FakeModelingLayer) -> str:
+            original: Callable[[FakeFrontend], str],
+        ) -> Callable[[FakeFrontend], str]:
+            def observed(modeling_layer: FakeFrontend) -> str:
                 def call() -> str:
                     return original(modeling_layer)
 
@@ -74,7 +74,7 @@ class Integration:
                         sense=sense,
                         objective_value=objective_value,
                         dual_bound=dual_bound,
-                        stats=solver.stats,
+                        statistics=solver.statistics,
                     )
                     parameters: tuple[SolverParameter, ...] = tuple(
                         SolverParameter(name=name, value=value)
@@ -83,7 +83,7 @@ class Integration:
                     metadata: ReportedMetadata = ReportedMetadata(
                         solver="fake",
                         parameters=parameters,
-                        wall_time_includes_model_build=True,
+                        wall_time_includes_problem_build=True,
                     )
                     return SolveObservation(
                         api=self.api,

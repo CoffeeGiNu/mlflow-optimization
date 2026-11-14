@@ -14,7 +14,7 @@ def autolog(
     disable: bool = False,
     *,
     solvers: Iterable[str] | None = None,
-    log_params: bool = True,
+    log_solver_parameters: bool = True,
     log_solver_metrics: bool = True,
     log_artifacts: bool = True,
 ) -> None:
@@ -22,7 +22,7 @@ def autolog(
     _bootstrap.configure(
         disable=disable,
         solvers=solvers,
-        log_params=log_params,
+        log_solver_parameters=log_solver_parameters,
         log_solver_metrics=log_solver_metrics,
         log_artifacts=log_artifacts,
     )

@@ -2,7 +2,7 @@
 
 from mlflow_optimization.common.diagnostics import warn
 
-from .models import ReportedOutcome, SolveOutcome, Termination
+from .types import ReportedOutcome, SolveOutcome, Termination
 
 
 def classify_outcome(

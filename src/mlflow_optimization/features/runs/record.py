@@ -8,27 +8,27 @@ from mlflow_optimization.common.diagnostics import warn
 from mlflow_optimization.features.annotations.annotate import (
     annotation_tags,
     current_annotation,
-    kpi_entry,
+    user_metric,
     user_tags,
 )
-from mlflow_optimization.features.annotations.models import Annotation, KpiEntry
+from mlflow_optimization.features.annotations.types import Annotation, UserMetric
 from mlflow_optimization.features.artifacts.policy import artifact_refusal
 from mlflow_optimization.features.artifacts.ports import (
     ArtifactStore,
     ArtifactStoreError,
 )
-from mlflow_optimization.features.autolog.models import CompletedSolve, SolveObservation
+from mlflow_optimization.features.autolog.types import CompletedSolve, SolveObservation
 from mlflow_optimization.features.metadata.collect import collect_metadata
-from mlflow_optimization.features.metadata.models import CollectedMetadata
-from mlflow_optimization.features.metrics.models import NormalizedMetrics
+from mlflow_optimization.features.metadata.types import CollectedMetadata
+from mlflow_optimization.features.metrics.types import NormalizedMetrics
 from mlflow_optimization.features.metrics.normalize import normalize_metrics
 from mlflow_optimization.features.outcomes.classify import (
     classify_outcome,
     outcome_tags,
 )
-from mlflow_optimization.features.outcomes.models import SolveOutcome
+from mlflow_optimization.features.outcomes.types import SolveOutcome
 
-from .models import RecordOptions, RunRef, RunStatus, SolveRecord
+from .types import RecordOptions, RunReference, RunStatus, SolveRecord
 from .ports import RunStore, RunStoreError
 
 
@@ -36,7 +36,7 @@ from .ports import RunStore, RunStoreError
 class _RecordingContext:
     """The state captured at solve start."""
 
-    parent: RunRef | None
+    parent: RunReference | None
     annotation: Annotation
 
 
@@ -47,18 +47,18 @@ class SolveRun:
 
     def __init__(
         self,
-        run: RunRef,
+        run: RunReference,
         runs: RunStore,
         artifacts: ArtifactStore,
         options: RecordOptions,
     ) -> None:
         self.run_id: str = run.run_id
-        self._run: RunRef = run
+        self._run: RunReference = run
         self._runs: RunStore = runs
         self._artifacts: ArtifactStore = artifacts
         self._options: RecordOptions = options
 
-    def log_kpi(
+    def log_metric(
         self,
         name: str,
         value: float,
@@ -66,10 +66,10 @@ class SolveRun:
         unit: str | None = None,
         description: str | None = None,
     ) -> None:
-        """Add a user KPI to this solve."""
+        """Add a user metric to this solve."""
         error: RunStoreError
         try:
-            entry: KpiEntry | None = kpi_entry(
+            entry: UserMetric | None = user_metric(
                 name, value, unit=unit, description=description
             )
             if entry is not None:
@@ -77,7 +77,7 @@ class SolveRun:
                 if entry.tags:
                     self._runs.set_tags(self._run, entry.tags)
         except RunStoreError as error:
-            warn(f"Could not log KPI: {error}")
+            warn(f"Could not log metric: {error}")
 
     def set_tags(self, tags: Mapping[str, str]) -> None:
         """Add user tags to this solve."""
@@ -121,7 +121,7 @@ class RecordSolve:
 
     def begin(self) -> object:
         """The parent run and annotations in effect at solve start."""
-        parent: RunRef | None
+        parent: RunReference | None
         error: RunStoreError
         try:
             parent = self._runs.active_run()
@@ -148,7 +148,7 @@ class RecordSolve:
         metadata: CollectedMetadata = collect_metadata(
             solve.api,
             observation.metadata if observation else None,
-            include_params=self.options.log_params,
+            include_parameters=self.options.log_solver_parameters,
         )
         tags: dict[str, str] = dict(annotation_tags(context.annotation))
         tags.update(outcome_tags(outcome))
@@ -175,7 +175,7 @@ class RecordSolve:
             metrics=metrics.values,
             params=metadata.params,
         )
-        run: RunRef
+        run: RunReference
         error: RunStoreError
         try:
             run = self._runs.save(record, context.parent)

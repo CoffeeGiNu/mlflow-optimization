@@ -6,7 +6,7 @@ from enum import StrEnum
 
 
 @dataclass(frozen=True)
-class RunRef:
+class RunReference:
     """The identity of a run in the experiment tracker."""
 
     run_id: str
@@ -38,6 +38,6 @@ class SolveRecord:
 class RecordOptions:
     """Which optional parts of a solve are recorded."""
 
-    log_params: bool = True
+    log_solver_parameters: bool = True
     log_solver_metrics: bool = True
     log_artifacts: bool = True

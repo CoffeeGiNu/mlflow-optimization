@@ -8,19 +8,19 @@ from functools import wraps
 from typing import Any
 
 from mlflow_optimization.common.patching import Patch
-from mlflow_optimization.features.autolog.models import SolveObservation
+from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
-from mlflow_optimization.features.metadata.models import (
+from mlflow_optimization.features.metadata.types import (
     ParameterOrigin,
     ReportedMetadata,
     SolverParameter,
 )
-from mlflow_optimization.features.metrics.models import (
+from mlflow_optimization.features.metrics.types import (
     MissingReason,
     ObjectiveSense,
     ReportedMetrics,
 )
-from mlflow_optimization.features.outcomes.models import ReportedOutcome, Termination
+from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
 
 PARAMETER_CONTROL_NAMES: frozenset[str] = frozenset(
     {
@@ -434,7 +434,7 @@ class Integration:
             objective_value=objective_value,
             dual_bound=dual_bound,
             solver_time_seconds=solver_time_seconds,
-            stats=statistics,
+            statistics=statistics,
             native=native_metrics,
         )
 
@@ -457,7 +457,7 @@ class Integration:
             solver_version=self._solver_version(solver, result),
             problem=problem,
             parameters=parameters,
-            wall_time_includes_model_build=True,
+            wall_time_includes_problem_build=True,
         )
 
     def _model_size(self, model: Any | None) -> dict[str, int]:

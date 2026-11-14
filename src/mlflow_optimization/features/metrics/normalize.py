@@ -3,9 +3,9 @@
 from math import isfinite
 
 from ...common.diagnostics import warn
-from .models import (
+from .types import (
     COMMON_METRICS,
-    COMMON_STATS,
+    COMMON_STATISTICS,
     MissingReason,
     NormalizedMetrics,
     ReportedMetrics,
@@ -72,8 +72,8 @@ def normalize_metrics(
 
         _record_reported_metric(values, missing, "solver_time_seconds", reported.solver_time_seconds)
 
-        for metric_name, reported_value in reported.stats.items():
-            if metric_name in COMMON_STATS:
+        for metric_name, reported_value in reported.statistics.items():
+            if metric_name in COMMON_STATISTICS:
                 _record_reported_metric(values, missing, metric_name, reported_value)
 
         if reported.has_objective is False:

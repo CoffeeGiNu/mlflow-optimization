@@ -2,9 +2,9 @@
 
 from dataclasses import dataclass, field
 
-from mlflow_optimization.features.metadata.models import ReportedMetadata
-from mlflow_optimization.features.metrics.models import ReportedMetrics
-from mlflow_optimization.features.outcomes.models import ReportedOutcome
+from mlflow_optimization.features.metadata.types import ReportedMetadata
+from mlflow_optimization.features.metrics.types import ReportedMetrics
+from mlflow_optimization.features.outcomes.types import ReportedOutcome
 
 
 @dataclass(frozen=True)

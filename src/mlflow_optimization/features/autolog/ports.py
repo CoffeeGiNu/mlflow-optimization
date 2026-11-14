@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from typing import Protocol
 
-from .models import CompletedSolve, SolveObservation
+from .types import CompletedSolve, SolveObservation
 
 
 class ObservationError(Exception):

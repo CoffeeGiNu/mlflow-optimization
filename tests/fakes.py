@@ -3,15 +3,15 @@
 from collections.abc import Callable
 
 from mlflow_optimization.common.patching import Patch
-from mlflow_optimization.features.autolog.models import SolveObservation
+from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.autolog.ports import SolveObserver
-from mlflow_optimization.features.metadata.models import ReportedMetadata, SolverParameter
-from mlflow_optimization.features.metrics.models import (
+from mlflow_optimization.features.metadata.types import ReportedMetadata, SolverParameter
+from mlflow_optimization.features.metrics.types import (
     MissingReason,
     ObjectiveSense,
     ReportedMetrics,
 )
-from mlflow_optimization.features.outcomes.models import ReportedOutcome, Termination
+from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
 
 
 class FakeSolver:
@@ -26,7 +26,7 @@ class FakeSolver:
         bound: float | None = 1.0,
         sense: str | ObjectiveSense = "minimize",
         parameters: dict[str, int | float | str | bool] | None = None,
-        stats: dict[str, float] | None = None,
+        statistics: dict[str, float] | None = None,
         raises: BaseException | None = None,
     ) -> None:
         self.status: str | Termination = status
@@ -37,7 +37,7 @@ class FakeSolver:
         self.parameters: dict[str, int | float | str | bool] = (
             parameters.copy() if parameters is not None else {}
         )
-        self.stats: dict[str, float] = stats.copy() if stats is not None else {}
+        self.statistics: dict[str, float] = statistics.copy() if statistics is not None else {}
         self.raises: BaseException | None = raises
 
     def solve(self) -> str:
@@ -94,7 +94,7 @@ class Integration:
                         sense=sense,
                         objective_value=objective_value,
                         dual_bound=dual_bound,
-                        stats=solver.stats,
+                        statistics=solver.statistics,
                     )
                     parameters: tuple[SolverParameter, ...] = tuple(
                         SolverParameter(name=name, value=value)

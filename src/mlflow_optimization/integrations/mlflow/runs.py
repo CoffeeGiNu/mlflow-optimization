@@ -26,32 +26,32 @@ from mlflow.utils.validation import (
 )
 from requests.exceptions import RequestException
 
-from mlflow_optimization.features.runs.models import RunRef, SolveRecord
+from mlflow_optimization.features.runs.types import RunReference, SolveRecord
 from mlflow_optimization.features.runs.ports import RunStoreError
 
 
 class MlflowRunStore:
     """Solve runs stored through the MLflow tracking client."""
 
-    def active_run(self: MlflowRunStore) -> RunRef | None:
+    def active_run(self: MlflowRunStore) -> RunReference | None:
         try:
             active_mlflow_run: ActiveRun | None = mlflow.active_run()
             if active_mlflow_run is None:
                 return None
-            return RunRef(
+            return RunReference(
                 run_id=active_mlflow_run.info.run_id,
                 experiment_id=active_mlflow_run.info.experiment_id,
             )
         except (MlflowException, ServerInfoRequestError, RequestException, OSError) as error:
             raise RunStoreError("MLflow run storage failed.") from error
 
-    def save(self: MlflowRunStore, record: SolveRecord, parent: RunRef | None) -> RunRef:
+    def save(self: MlflowRunStore, record: SolveRecord, parent: RunReference | None) -> RunReference:
         try:
             return self._save(record, parent)
         except (MlflowException, ServerInfoRequestError, RequestException, OSError) as error:
             raise RunStoreError("MLflow run storage failed.") from error
 
-    def _save(self: MlflowRunStore, record: SolveRecord, parent: RunRef | None) -> RunRef:
+    def _save(self: MlflowRunStore, record: SolveRecord, parent: RunReference | None) -> RunReference:
         tracking_client: MlflowClient = MlflowClient(tracking_uri=mlflow.get_tracking_uri())
         experiment_id: str
         if parent is None:
@@ -112,12 +112,12 @@ class MlflowRunStore:
             status=record.status.value,
             end_time=record.end_time_ms,
         )
-        return RunRef(
+        return RunReference(
             run_id=created_run.info.run_id,
             experiment_id=created_run.info.experiment_id,
         )
 
-    def log_metric(self: MlflowRunStore, run: RunRef, key: str, value: float) -> None:
+    def log_metric(self: MlflowRunStore, run: RunReference, key: str, value: float) -> None:
         try:
             tracking_client: MlflowClient = MlflowClient(tracking_uri=mlflow.get_tracking_uri())
             tracking_client.log_metric(
@@ -129,7 +129,7 @@ class MlflowRunStore:
         except (MlflowException, ServerInfoRequestError, RequestException, OSError) as error:
             raise RunStoreError("MLflow run storage failed.") from error
 
-    def set_tags(self: MlflowRunStore, run: RunRef, tags: Mapping[str, str]) -> None:
+    def set_tags(self: MlflowRunStore, run: RunReference, tags: Mapping[str, str]) -> None:
         try:
             tracking_client: MlflowClient = MlflowClient(tracking_uri=mlflow.get_tracking_uri())
             self._log_tag_batches(tracking_client, run.run_id, _make_tag_entities(tags))

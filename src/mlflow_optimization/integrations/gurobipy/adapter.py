@@ -7,11 +7,11 @@ from typing import Any
 import gurobipy
 
 from mlflow_optimization.common.patching import Patch
-from mlflow_optimization.features.autolog.models import SolveObservation
+from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver, SolverIntegration
-from mlflow_optimization.features.metadata.models import ParameterOrigin, ReportedMetadata, SolverParameter
-from mlflow_optimization.features.metrics.models import MissingReason, ObjectiveSense, ReportedMetrics
-from mlflow_optimization.features.outcomes.models import ReportedOutcome, Termination
+from mlflow_optimization.features.metadata.types import ParameterOrigin, ReportedMetadata, SolverParameter
+from mlflow_optimization.features.metrics.types import MissingReason, ObjectiveSense, ReportedMetrics
+from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
 
 
 _STATUS_TERMINATIONS: dict[int, tuple[str, Termination]] = {
@@ -89,7 +89,7 @@ def _extract(model: gurobipy.Model, error: BaseException | None) -> SolveObserva
     objective_value: float | MissingReason = _read_objective_value(model, has_objective, has_solution)
     dual_bound: float | MissingReason = _read_dual_bound(model, has_objective)
     solver_time_seconds: float | MissingReason = _read_solver_number(model, "Runtime")
-    stats: dict[str, float | MissingReason] = {
+    statistics: dict[str, float | MissingReason] = {
         "node_count": _read_solver_number(model, "NodeCount"),
         "simplex_iterations": _read_solver_number(model, "IterCount"),
         "barrier_iterations": _read_solver_number(model, "BarIterCount"),
@@ -126,7 +126,7 @@ def _extract(model: gurobipy.Model, error: BaseException | None) -> SolveObserva
         objective_value=objective_value,
         dual_bound=dual_bound,
         solver_time_seconds=solver_time_seconds,
-        stats=stats,
+        statistics=statistics,
         native=native,
     )
     metadata: ReportedMetadata = ReportedMetadata(
@@ -135,7 +135,7 @@ def _extract(model: gurobipy.Model, error: BaseException | None) -> SolveObserva
         solver_version=solver_version,
         problem=problem,
         parameters=_read_parameters(model),
-        wall_time_includes_model_build=False,
+        wall_time_includes_problem_build=False,
     )
     return SolveObservation(api="gurobipy", outcome=outcome, metrics=metrics, metadata=metadata)
 

@@ -21,7 +21,7 @@ class ObjectiveSense(StrEnum):
     MAXIMIZE = "maximize"
 
 
-COMMON_STATS = ("node_count", "simplex_iterations", "barrier_iterations")
+COMMON_STATISTICS = ("node_count", "simplex_iterations", "barrier_iterations")
 COMMON_METRICS = (
     "objective_value",
     "dual_bound",
@@ -29,7 +29,7 @@ COMMON_METRICS = (
     "relative_gap",
     "wall_time_seconds",
     "solver_time_seconds",
-    *COMMON_STATS,
+    *COMMON_STATISTICS,
 )
 
 
@@ -42,7 +42,7 @@ class ReportedMetrics:
     objective_value: float | MissingReason = MissingReason.UNSUPPORTED
     dual_bound: float | MissingReason = MissingReason.UNSUPPORTED
     solver_time_seconds: float | MissingReason = MissingReason.UNSUPPORTED
-    stats: Mapping[str, float | MissingReason] = field(default_factory=dict)
+    statistics: Mapping[str, float | MissingReason] = field(default_factory=dict)
     native: Mapping[str, float] = field(default_factory=dict)
 
 

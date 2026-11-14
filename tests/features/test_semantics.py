@@ -5,13 +5,13 @@ import pytest
 
 from mlflow_optimization.common.diagnostics import MlflowOptimizationWarning
 from mlflow_optimization.features.metadata.collect import collect_metadata
-from mlflow_optimization.features.metadata.models import (
+from mlflow_optimization.features.metadata.types import (
     CollectedMetadata,
     ParameterOrigin,
     ReportedMetadata,
     SolverParameter,
 )
-from mlflow_optimization.features.metrics.models import (
+from mlflow_optimization.features.metrics.types import (
     MissingReason,
     ObjectiveSense,
     NormalizedMetrics,
@@ -22,7 +22,7 @@ from mlflow_optimization.features.outcomes.classify import (
     classify_outcome,
     outcome_tags,
 )
-from mlflow_optimization.features.outcomes.models import (
+from mlflow_optimization.features.outcomes.types import (
     ReportedOutcome,
     SolveOutcome,
     Termination,
@@ -210,7 +210,7 @@ def test_non_finite_common_and_native_metrics_are_not_recorded() -> None:
         objective_value=math.nan,
         dual_bound=math.inf,
         solver_time_seconds=-math.inf,
-        stats={"node_count": math.nan, "barrier_iterations": -math.inf},
+        statistics={"node_count": math.nan, "barrier_iterations": -math.inf},
         native={"branches": math.inf},
     )
     with warnings.catch_warnings():
@@ -375,7 +375,7 @@ def test_parameter_collection_filters_sensitive_values_and_preserves_origins(
 ) -> None:
     reported: ReportedMetadata = ReportedMetadata(parameters=(parameter,))
     collected: CollectedMetadata = collect_metadata(
-        "fake", reported, include_params=True
+        "fake", reported, include_parameters=True
     )
 
     if expected_parameter_name is None:

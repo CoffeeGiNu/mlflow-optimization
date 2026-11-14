@@ -10,22 +10,22 @@ from ortools.sat import sat_parameters_pb2
 from ortools.sat.python import cp_model
 
 from mlflow_optimization.common.patching import Patch
-from mlflow_optimization.features.autolog.models import SolveObservation
+from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.autolog.ports import (
     ObservationError,
     SolveObserver,
 )
-from mlflow_optimization.features.metadata.models import (
+from mlflow_optimization.features.metadata.types import (
     ParameterOrigin,
     ReportedMetadata,
     SolverParameter,
 )
-from mlflow_optimization.features.metrics.models import (
+from mlflow_optimization.features.metrics.types import (
     MissingReason,
     ObjectiveSense,
     ReportedMetrics,
 )
-from mlflow_optimization.features.outcomes.models import ReportedOutcome, Termination
+from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
 
 
 class Integration:
@@ -238,7 +238,7 @@ class Integration:
             objective_value=objective_value,
             dual_bound=dual_bound,
             solver_time_seconds=solver_time_seconds,
-            stats={},
+            statistics={},
             native=native,
         )
 
@@ -381,7 +381,7 @@ class Integration:
             solver_version=ortools.__version__,
             problem=problem,
             parameters=parameters,
-            wall_time_includes_model_build=False,
+            wall_time_includes_problem_build=False,
         )
 
     def _read_problem_size(self, model: Any | None) -> dict[str, int]:

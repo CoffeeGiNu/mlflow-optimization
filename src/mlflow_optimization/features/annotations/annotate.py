@@ -7,7 +7,7 @@ from math import isfinite
 
 from mlflow_optimization.common.diagnostics import warn
 
-from .models import Annotation, KpiEntry
+from .types import Annotation, UserMetric
 
 
 _annotation_context: ContextVar[Annotation] = ContextVar(
@@ -71,20 +71,20 @@ def user_tags(tags: Mapping[str, str]) -> dict[str, str]:
     return accepted_tags
 
 
-def kpi_entry(
+def user_metric(
     name: str, value: float, *, unit: str | None = None, description: str | None = None
-) -> KpiEntry | None:
-    """The record of one user KPI, or None when it may not be recorded."""
+) -> UserMetric | None:
+    """The record of one user metric, or None when it may not be recorded."""
     if name.startswith(("optimization.", "mlflow.")):
-        warn(f"Ignoring user KPI with reserved name {name!r}.")
+        warn(f"Ignoring user metric with reserved name {name!r}.")
         return None
     if not isfinite(value):
-        warn(f"Ignoring user KPI {name!r} because its value is not finite.")
+        warn(f"Ignoring user metric {name!r} because its value is not finite.")
         return None
-    metric_key: str = f"kpi.{name}"
+    metric_key: str = f"user.{name}"
     tags: dict[str, str] = {}
     if unit is not None:
         tags[f"{metric_key}.unit"] = unit
     if description is not None:
         tags[f"{metric_key}.description"] = description
-    return KpiEntry(metric_key=metric_key, value=value, tags=tags)
+    return UserMetric(metric_key=metric_key, value=value, tags=tags)

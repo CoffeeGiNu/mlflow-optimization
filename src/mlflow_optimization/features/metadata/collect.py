@@ -2,7 +2,7 @@
 
 import re
 
-from .models import (
+from .types import (
     CollectedMetadata,
     ParameterOrigin,
     ReportedMetadata,
@@ -69,7 +69,7 @@ def _format_value(value: int | float | str | bool) -> str:
 
 
 def collect_metadata(
-    api: str, reported: ReportedMetadata | None, *, include_params: bool
+    api: str, reported: ReportedMetadata | None, *, include_parameters: bool
 ) -> CollectedMetadata:
     """The recordable experiment conditions of a solve.
 
@@ -86,14 +86,14 @@ def collect_metadata(
         tags["optimization.api_version"] = reported.api_version
     if reported.solver_version is not None:
         tags["optimization.solver_version"] = reported.solver_version
-    tags["optimization.wall_time_includes_model_build"] = _format_value(
-        reported.wall_time_includes_model_build
+    tags["optimization.wall_time_includes_problem_build"] = _format_value(
+        reported.wall_time_includes_problem_build
     )
 
     for problem_name, problem_value in reported.problem.items():
         params[f"problem.{problem_name}"] = _format_value(problem_value)
 
-    if include_params:
+    if include_parameters:
         parameter_prefixes: dict[ParameterOrigin, str] = {
             ParameterOrigin.EXPLICIT: "solver_param.",
             ParameterOrigin.DEFAULT: "solver_param_default.",

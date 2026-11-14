@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from mlflow_optimization.common.diagnostics import MlflowOptimizationWarning, warn
 
-from .models import CompletedSolve, SolveObservation
+from .types import CompletedSolve, SolveObservation
 from .ports import ObservationError, SolverIntegration, SolveSink
 
 

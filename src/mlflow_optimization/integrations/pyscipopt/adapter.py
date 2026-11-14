@@ -11,19 +11,19 @@ from typing import Any
 
 import pyscipopt
 import pyscipopt.scip
-from mlflow_optimization.features.autolog.models import SolveObservation
+from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
-from mlflow_optimization.features.metadata.models import (
+from mlflow_optimization.features.metadata.types import (
     ParameterOrigin,
     ReportedMetadata,
     SolverParameter,
 )
-from mlflow_optimization.features.metrics.models import (
+from mlflow_optimization.features.metrics.types import (
     MissingReason,
     ObjectiveSense,
     ReportedMetrics,
 )
-from mlflow_optimization.features.outcomes.models import ReportedOutcome, Termination
+from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
 
 _PYSCIPOPT_READ_ERRORS: tuple[type[Exception], ...] = (
     AttributeError,
@@ -216,7 +216,7 @@ def _extract_observation(
         lambda: float(model.getSolvingTime())
     )
     node_count: float | MissingReason = _read_number(lambda: float(model.getNNodes()))
-    stats: dict[str, float | MissingReason] = {"node_count": node_count}
+    statistics: dict[str, float | MissingReason] = {"node_count": node_count}
     native: dict[str, float] = {}
 
     _add_native_number(native, "solution_count", lambda: float(model.getNSols()))
@@ -242,7 +242,7 @@ def _extract_observation(
         objective_value=objective_value,
         dual_bound=dual_bound,
         solver_time_seconds=solver_time_seconds,
-        stats=stats,
+        statistics=statistics,
         native=native,
     )
     metadata: ReportedMetadata = _read_metadata(model)
@@ -337,7 +337,7 @@ def _read_metadata(model: Any) -> ReportedMetadata:
         solver_version=solver_version,
         problem=problem,
         parameters=parameters,
-        wall_time_includes_model_build=False,
+        wall_time_includes_problem_build=False,
     )
 
 

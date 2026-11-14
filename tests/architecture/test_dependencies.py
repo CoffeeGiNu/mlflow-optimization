@@ -14,9 +14,9 @@ FEATURE_IMPORT_RULES: dict[str, dict[str, frozenset[str] | None]] = {
     "annotations": {},
     "artifacts": {},
     "autolog": {
-        "metadata": frozenset({"models"}),
-        "metrics": frozenset({"models"}),
-        "outcomes": frozenset({"models"}),
+        "metadata": frozenset({"types"}),
+        "metrics": frozenset({"types"}),
+        "outcomes": frozenset({"types"}),
     },
     "metadata": {},
     "metrics": {},
@@ -24,7 +24,7 @@ FEATURE_IMPORT_RULES: dict[str, dict[str, frozenset[str] | None]] = {
     "runs": {
         "annotations": None,
         "artifacts": None,
-        "autolog": frozenset({"models", "ports"}),
+        "autolog": frozenset({"types", "ports"}),
         "metadata": None,
         "metrics": None,
         "outcomes": None,
@@ -232,7 +232,7 @@ def _check_integration_import(
         feature_module: str = _feature_module_name(target_module, target_feature)
         if (
             target_feature in FEATURE_IMPORT_RULES
-            and feature_module in {"models", "ports"}
+            and feature_module in {"types", "ports"}
         ):
             return None
         return f"{relative_path}: integration '{source_integration}' imports feature module '{target_module}'"

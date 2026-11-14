@@ -31,7 +31,7 @@ class ReportedMetadata:
     solver_version: str | None = None
     problem: Mapping[str, int | float | str | bool] = field(default_factory=dict)
     parameters: Sequence[SolverParameter] = ()
-    wall_time_includes_model_build: bool = False
+    wall_time_includes_problem_build: bool = False
 
 
 @dataclass(frozen=True)

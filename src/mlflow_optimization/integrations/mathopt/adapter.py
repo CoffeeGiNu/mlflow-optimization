@@ -16,19 +16,19 @@ from ortools.math_opt.python.result import SolveResult
 from ortools.math_opt.python.solve import StatusNotOk
 
 from mlflow_optimization.common.patching import Patch
-from mlflow_optimization.features.autolog.models import SolveObservation
+from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
-from mlflow_optimization.features.metadata.models import (
+from mlflow_optimization.features.metadata.types import (
     ParameterOrigin,
     ReportedMetadata,
     SolverParameter,
 )
-from mlflow_optimization.features.metrics.models import (
+from mlflow_optimization.features.metrics.types import (
     MissingReason,
     ObjectiveSense,
     ReportedMetrics,
 )
-from mlflow_optimization.features.outcomes.models import ReportedOutcome, Termination
+from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
 
 ParameterValue = int | float | str | bool
 _UNAVAILABLE: object = object()
@@ -323,7 +323,7 @@ class Integration:
             objective_value = self._objective_value(result, has_solution)
             dual_bound = self._numeric_result_value(result, "dual_bound")
             solver_time_seconds = self._solver_time(result)
-        stats: dict[str, float | MissingReason] = self._stats(result)
+        statistics: dict[str, float | MissingReason] = self._statistics(result)
         native: dict[str, float] = self._native_statistics(result, solver_type)
         return ReportedMetrics(
             has_objective=has_objective,
@@ -331,7 +331,7 @@ class Integration:
             objective_value=objective_value,
             dual_bound=dual_bound,
             solver_time_seconds=solver_time_seconds,
-            stats=stats,
+            statistics=statistics,
             native=native,
         )
 
@@ -419,24 +419,24 @@ class Integration:
             return duration.total_seconds()
         return MissingReason.FAILED
 
-    def _stats(self, result: SolveResult | None) -> dict[str, float | MissingReason]:
+    def _statistics(self, result: SolveResult | None) -> dict[str, float | MissingReason]:
         """The common search statistics reported by MathOpt."""
-        stats: dict[str, float | MissingReason] = {
+        statistics: dict[str, float | MissingReason] = {
             "node_count": MissingReason.UNSUPPORTED,
             "simplex_iterations": MissingReason.UNSUPPORTED,
             "barrier_iterations": MissingReason.UNSUPPORTED,
         }
         if result is None:
-            return stats
+            return statistics
         solve_stats: object = self._guarded_attribute(result, "solve_stats")
         statistic_name: str
-        for statistic_name in stats:
+        for statistic_name in statistics:
             value: object = self._guarded_attribute(solve_stats, statistic_name)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
-                stats[statistic_name] = float(value)
+                statistics[statistic_name] = float(value)
             elif value is _UNAVAILABLE:
-                stats[statistic_name] = MissingReason.FAILED
-        return stats
+                statistics[statistic_name] = MissingReason.FAILED
+        return statistics
 
     def _native_statistics(
         self,
@@ -541,7 +541,7 @@ class Integration:
             solver_version=None,
             problem=problem,
             parameters=parameters,
-            wall_time_includes_model_build=False,
+            wall_time_includes_problem_build=False,
         )
 
     def _problem_size(self, model: Model | None) -> dict[str, int | float | str | bool]:

@@ -8,23 +8,23 @@ import ortools
 from ortools.constraint_solver import pywrapcp
 
 from mlflow_optimization.common.patching import Patch
-from mlflow_optimization.features.autolog.models import SolveObservation
+from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.autolog.ports import (
     ObservationError,
     SolveObserver,
     SolverIntegration,
 )
-from mlflow_optimization.features.metadata.models import (
+from mlflow_optimization.features.metadata.types import (
     ParameterOrigin,
     ReportedMetadata,
     SolverParameter,
 )
-from mlflow_optimization.features.metrics.models import (
+from mlflow_optimization.features.metrics.types import (
     MissingReason,
     ObjectiveSense,
     ReportedMetrics,
 )
-from mlflow_optimization.features.outcomes.models import ReportedOutcome, Termination
+from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
 
 _STATUS_NAMES: dict[int, str] = {
     0: "ROUTING_NOT_SOLVED",
@@ -264,7 +264,7 @@ class Integration(SolverIntegration):
             solver_time_seconds = float(routing_model.solver().WallTime()) / 1000.0
         except (AttributeError, RuntimeError):
             solver_time_seconds = MissingReason.FAILED
-        stats: dict[str, float | MissingReason] = {}
+        statistics: dict[str, float | MissingReason] = {}
         native: dict[str, float] = {}
         branches: float | None = None
         try:
@@ -345,7 +345,7 @@ class Integration(SolverIntegration):
                     objective_value=objective_value,
                     dual_bound=MissingReason.UNSUPPORTED,
                     solver_time_seconds=solver_time_seconds,
-                    stats=stats,
+                    statistics=statistics,
                     native=native,
                 ),
                 metadata=ReportedMetadata(
@@ -354,7 +354,7 @@ class Integration(SolverIntegration):
                     solver_version=api_version,
                     problem=problem,
                     parameters=parameters,
-                    wall_time_includes_model_build=False,
+                    wall_time_includes_problem_build=False,
                 ),
             )
         except (TypeError, ValueError) as construction_error:
