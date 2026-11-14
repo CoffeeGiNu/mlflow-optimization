@@ -1,15 +1,17 @@
 """Observation hooks for Pyomo solver calls."""
 
 import importlib
+import inspect
 import math
+import pkgutil
 from collections.abc import Callable, Mapping, Sequence
 from datetime import timedelta
 from functools import wraps
 from typing import Any
 
 from mlflow_optimization.common.patching import Patch
-from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
+from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.metadata.types import (
     ParameterOrigin,
     ReportedMetadata,
@@ -24,12 +26,19 @@ from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termina
 
 PARAMETER_CONTROL_NAMES: frozenset[str] = frozenset(
     {
+        "keepfiles",
         "load_solution",
         "load_solutions",
         "logfile",
+        "model",
+        "options",
         "raise_exception_on_nonoptimal_result",
         "report_timing",
+        "solver_io",
+        "solver_options",
+        "solnfile",
         "stream_solver",
+        "suffixes",
         "symbolic_solver_labels",
         "tee",
         "timer",
@@ -80,7 +89,8 @@ class Integration:
         if self._patches:
             return
         try:
-            from pyomo.contrib.appsi.base import LegacySolverInterface
+            from pyomo.contrib.appsi import solvers as appsi_solver_package
+            from pyomo.contrib.appsi.base import LegacySolverInterface, PersistentSolver
             from pyomo.contrib.solver.common.base import LegacySolverWrapper, SolverBase
             from pyomo.opt.base.solvers import OptSolver
             from pyomo.solvers.plugins.solvers.direct_or_persistent_solver import (
@@ -89,10 +99,26 @@ class Integration:
         except ImportError as error:
             raise ImportError("The Pyomo integration requires Pyomo.") from error
         self._solver_exceptions = self._load_solver_exceptions()
+        appsi_solver_modules: tuple[str, ...] = tuple(
+            module_info.name
+            for module_info in pkgutil.iter_modules(
+                appsi_solver_package.__path__,
+                f"{appsi_solver_package.__name__}.",
+            )
+            if module_info.name.rsplit(".", 1)[-1] != "tests"
+        )
+        for appsi_solver_module in appsi_solver_modules:
+            try:
+                importlib.import_module(appsi_solver_module)
+            except (ImportError, AttributeError):
+                continue
+            except self._solver_exceptions:
+                continue
         owners: tuple[type[Any], ...] = (
             OptSolver,
             DirectOrPersistentSolver,
             LegacySolverInterface,
+            PersistentSolver,
             SolverBase,
             LegacySolverWrapper,
         )
@@ -133,12 +159,19 @@ class Integration:
                 patch: Patch = Patch(owner, "solve")
 
                 def factory(original: Callable[..., Any]) -> Callable[..., Any]:
+                    original_signature: inspect.Signature = inspect.signature(original)
+
                     @wraps(original)
                     def wrapped(
                         solver: Any,
                         *solve_arguments: Any,
                         **solve_keywords: Any,
                     ) -> Any:
+                        original_signature.bind(
+                            solver,
+                            *solve_arguments,
+                            **solve_keywords,
+                        )
                         model: Any | None = (
                             solve_arguments[0]
                             if solve_arguments
@@ -203,7 +236,13 @@ class Integration:
     ) -> SolveObservation:
         try:
             outcome: ReportedOutcome = self._outcome(solver, result, error)
-            metrics: ReportedMetrics = self._metrics(solver, result, model, error)
+            metrics: ReportedMetrics = self._metrics(
+                solver,
+                result,
+                model,
+                error,
+                outcome,
+            )
             metadata: ReportedMetadata = self._metadata(
                 solver, model, result, solve_keywords
             )
@@ -271,7 +310,11 @@ class Integration:
                 termination = Termination.OPTIMAL
             elif normalized_solution_status == "feasible":
                 termination = Termination.FEASIBLE
-        has_solution: bool | None = self._has_solution(result_sources)
+        native_solver: Any | None = self._read(solver, "_solver_model")[0]
+        has_solution: bool | None = self._has_solution(
+            result_sources,
+            native_solver,
+        )
         if (
             native_termination_name is not None
             and native_termination_name.rsplit(".", 1)[-1].casefold() == "other"
@@ -289,7 +332,7 @@ class Integration:
             "convergencecriteriasatisfied": Termination.UNKNOWN,
             "optimal": Termination.OPTIMAL,
             "globallyoptimal": Termination.OPTIMAL,
-            "locallyoptimal": Termination.OPTIMAL,
+            "locallyoptimal": Termination.FEASIBLE,
             "feasible": Termination.FEASIBLE,
             "other": Termination.UNKNOWN,
             "infeasible": Termination.INFEASIBLE,
@@ -330,7 +373,11 @@ class Integration:
         }
         return terminations.get(normalized_name, Termination.UNKNOWN)
 
-    def _has_solution(self, result_sources: Sequence[Any]) -> bool | None:
+    def _has_solution(
+        self,
+        result_sources: Sequence[Any],
+        native_solver: Any | None,
+    ) -> bool | None:
         if not result_sources:
             return None
         for source in result_sources:
@@ -355,7 +402,10 @@ class Integration:
                 source,
                 "best_feasible_objective",
             )
-            feasible_number: float | None = self._number(feasible_objective)
+            feasible_number: float | None = self._native_number(
+                feasible_objective,
+                native_solver,
+            )
             if feasible_number is not None:
                 return math.isfinite(feasible_number)
             if objective_reason is MissingReason.UNDEFINED:
@@ -363,7 +413,10 @@ class Integration:
             incumbent_objective, incumbent_reason = self._read(
                 source, "incumbent_objective"
             )
-            incumbent_number: float | None = self._number(incumbent_objective)
+            incumbent_number: float | None = self._native_number(
+                incumbent_objective,
+                native_solver,
+            )
             if incumbent_number is not None:
                 return math.isfinite(incumbent_number)
             if incumbent_reason is MissingReason.UNDEFINED:
@@ -387,6 +440,7 @@ class Integration:
         result: Any | None,
         model: Any | None,
         error: BaseException | None,
+        outcome: ReportedOutcome,
     ) -> ReportedMetrics:
         size: dict[str, int] = self._model_size(model)
         objectives: tuple[Any, ...] | None = self._model_objects(model, "Objective")
@@ -397,20 +451,32 @@ class Integration:
         result_sources: tuple[Any, ...] = (
             () if error is not None else self._result_sources(solver, result)
         )
-        has_solution: bool | None = self._has_solution(result_sources)
-        objective_value: float | MissingReason = self._objective_value(result_sources)
+        native_solver: Any | None = None
+        if error is None and result is not None:
+            native_solver = self._read(solver, "_solver_model")[0]
+        has_solution: bool | None = outcome.has_solution
+        objective_value: float | MissingReason = self._objective_value(
+            result_sources,
+            native_solver,
+        )
         if objective_value is MissingReason.UNSUPPORTED:
-            objective_value = self._solution_objective(result_sources)
+            objective_value = self._solution_objective(result_sources, native_solver)
         if objective_value is MissingReason.UNSUPPORTED:
-            objective_value = self._problem_objective(result_sources, sense)
+            objective_value = self._problem_objective(
+                result_sources,
+                sense,
+                native_solver,
+            )
         if has_solution is False and has_objective is not False:
             objective_value = MissingReason.NO_SOLUTION
         if objective_value is MissingReason.UNSUPPORTED and has_objective is False:
             objective_value = MissingReason.UNDEFINED
-        dual_bound: float | MissingReason = self._dual_bound(result_sources, sense)
-        native_solver: Any | None = None
-        if error is None and result is not None:
-            native_solver = self._read(solver, "_solver_model")[0]
+        dual_bound: float | MissingReason = self._dual_bound(
+            result_sources,
+            sense,
+            outcome.termination,
+            native_solver,
+        )
         solver_time_seconds: float | MissingReason = self._solver_time(
             result_sources,
             native_solver,
@@ -425,6 +491,9 @@ class Integration:
             result_sources,
             native_solver,
             solver_information,
+            has_solution,
+            size.get("num_integer_variables"),
+            outcome.termination,
         )
         if not size:
             size.update(self._result_size(result))
@@ -541,17 +610,23 @@ class Integration:
             return ObjectiveSense.MAXIMIZE
         return None
 
-    def _objective_value(self, result_sources: Sequence[Any]) -> float | MissingReason:
+    def _objective_value(
+        self,
+        result_sources: Sequence[Any],
+        native_solver: Any | None,
+    ) -> float | MissingReason:
         for result_source in result_sources:
             for field_name in ("best_feasible_objective", "incumbent_objective"):
                 value: Any | None = self._read(result_source, field_name)[0]
-                number: float | None = self._number(value)
-                if number is not None:
+                number: float | None = self._native_number(value, native_solver)
+                if number is not None and math.isfinite(number):
                     return number
         return MissingReason.UNSUPPORTED
 
     def _solution_objective(
-        self, result_sources: Sequence[Any]
+        self,
+        result_sources: Sequence[Any],
+        native_solver: Any | None,
     ) -> float | MissingReason:
         for result_source in result_sources:
             solutions: Any | None = self._read(result_source, "solution")[0]
@@ -570,8 +645,8 @@ class Integration:
                 if len(objectives) != 1:
                     continue
                 objectives = next(iter(objectives.values()))
-            number: float | None = self._number(objectives)
-            if number is not None:
+            number: float | None = self._native_number(objectives, native_solver)
+            if number is not None and math.isfinite(number):
                 return number
         return MissingReason.UNSUPPORTED
 
@@ -579,6 +654,7 @@ class Integration:
         self,
         result_sources: Sequence[Any],
         sense: ObjectiveSense | None,
+        native_solver: Any | None,
     ) -> float | MissingReason:
         bound_name: str | None = (
             "Upper bound"
@@ -592,19 +668,30 @@ class Integration:
         value: Any | None = self._section_value(
             result_sources, "problem", (bound_name,)
         )[0]
-        number: float | None = self._number(value)
-        return number if number is not None else MissingReason.UNSUPPORTED
+        number: float | None = self._native_number(value, native_solver)
+        if number is not None and math.isfinite(number):
+            return number
+        return MissingReason.UNSUPPORTED
 
     def _dual_bound(
         self,
         result_sources: Sequence[Any],
         sense: ObjectiveSense | None,
+        termination: Termination,
+        native_solver: Any | None,
     ) -> float | MissingReason:
+        if termination in (
+            Termination.INFEASIBLE,
+            Termination.INFEASIBLE_OR_UNBOUNDED,
+        ):
+            return MissingReason.UNSUPPORTED
         for result_source in result_sources:
             for field_name in ("best_objective_bound", "objective_bound"):
                 value: Any | None = self._read(result_source, field_name)[0]
-                number: float | None = self._number(value)
+                number: float | None = self._native_number(value, native_solver)
                 if number is not None:
+                    if math.isinf(number) and termination is not Termination.UNBOUNDED:
+                        continue
                     return number
         bound_name: str | None = (
             "Lower bound"
@@ -618,7 +705,13 @@ class Integration:
         bound: Any | None = self._section_value(
             result_sources, "problem", (bound_name,)
         )[0]
-        number: float | None = self._number(bound)
+        number: float | None = self._native_number(bound, native_solver)
+        if (
+            number is not None
+            and math.isinf(number)
+            and termination is not Termination.UNBOUNDED
+        ):
+            return MissingReason.UNSUPPORTED
         return number if number is not None else MissingReason.UNSUPPORTED
 
     def _solver_time(
@@ -626,20 +719,27 @@ class Integration:
         result_sources: Sequence[Any],
         native_solver: Any | None,
     ) -> float | MissingReason:
-        solving_time: float | None = self._method_number(
-            native_solver, "getSolvingTime"
+        for method_name in ("getSolvingTime", "getRunTime"):
+            solving_time: float | None = self._method_number(
+                native_solver,
+                method_name,
+            )
+            if solving_time is not None:
+                return solving_time
+        native_runtime: float | None = self._number(
+            self._read(native_solver, "Runtime")[0]
         )
-        if solving_time is not None:
-            return solving_time
+        if native_runtime is not None:
+            return native_runtime
         for result_source in result_sources:
-            solver_result: Any | None = self._read(result_source, "solver")[0]
+            timing_information: Any | None = self._read(
+                result_source,
+                "timing_info",
+            )[0]
             for owner, name in (
-                (solver_result, "time"),
-                (solver_result, "wallclock_time"),
-                (result_source, "solver_time"),
-                (result_source, "wallclock_time"),
-                (self._read(result_source, "timing_info")[0], "wall_time"),
-                (self._read(result_source, "timing_info")[0], "scip_time"),
+                (timing_information, "highs_time"),
+                (timing_information, "gurobi_time"),
+                (timing_information, "scip_time"),
             ):
                 value: Any | None = self._read(owner, name)[0]
                 if value is None:
@@ -701,6 +801,9 @@ class Integration:
         result_sources: Sequence[Any],
         native_solver: Any | None,
         solver_information: Any | None,
+        has_solution: bool | None,
+        integer_variable_count: int | None,
+        termination: Termination,
     ) -> dict[str, float]:
         native_paths: Mapping[str, tuple[tuple[str, ...], ...]] = {
             "reported_gap": (
@@ -726,11 +829,25 @@ class Integration:
             if solver_result is not None:
                 owners.append(solver_result)
         for metric_name, paths in native_paths.items():
+            if metric_name == "reported_gap" and (
+                has_solution is not True
+                or integer_variable_count is None
+                or integer_variable_count == 0
+                or termination
+                in (
+                    Termination.UNBOUNDED,
+                    Termination.INFEASIBLE,
+                    Termination.INFEASIBLE_OR_UNBOUNDED,
+                )
+            ):
+                continue
             value: float | None = self._first_number(owners, paths)
             if value is None and metric_name == "solution_count":
                 value = self._method_number(native_solver, "getNSols")
             if value is None and metric_name == "reported_gap":
                 value = self._method_number(native_solver, "getGap")
+            if metric_name == "reported_gap":
+                value = self._native_number(value, native_solver)
             if value is not None:
                 native[metric_name] = value
         for result_source in result_sources:
@@ -931,6 +1048,7 @@ class Integration:
         )
         for keyword_name in ("options", "solver_options"):
             self._add_parameter_mapping(values, solve_keywords.get(keyword_name))
+        self._add_parameter_mapping(values, solve_keywords, PARAMETER_CONTROL_NAMES)
         return tuple(
             SolverParameter(name, value, ParameterOrigin.EXPLICIT)
             for name, value in sorted(values.items())
@@ -1045,6 +1163,33 @@ class Integration:
 
     def _solver_version(self, solver: Any, result: Any | None) -> str | None:
         native_solver: Any | None = self._read(solver, "_solver_model")[0]
+        engine: str | None = self._engine(solver)
+        if native_solver is not None and engine == "scip":
+            version_parts: tuple[float | None, ...] = tuple(
+                self._method_number(native_solver, method_name)
+                for method_name in (
+                    "getMajorVersion",
+                    "getMinorVersion",
+                    "getTechVersion",
+                )
+            )
+            if all(version_part is not None for version_part in version_parts):
+                return ".".join(
+                    str(int(version_part)) for version_part in version_parts
+                )
+        if native_solver is not None:
+            for method_name in ("version", "getVersion"):
+                version_member: Any | None = self._read(native_solver, method_name)[0]
+                if callable(version_member):
+                    try:
+                        native_version: Any = version_member()
+                    except self._solver_exceptions:
+                        continue
+                    version: str | None = self._string(native_version)
+                    if version is not None:
+                        return version
+        if engine == "scip":
+            return None
         solver_version: Any | None = self._read(solver, "_version")[0]
         if solver_version is not None:
             version: str | None = self._string(solver_version)
@@ -1074,7 +1219,7 @@ class Integration:
                     version = self._string(value)
                     if version is not None:
                         return version
-        if self._engine(solver) == "highs":
+        if engine == "highs":
             version_method: Any | None = self._read(solver, "version")[0]
             if callable(version_method):
                 try:
@@ -1131,14 +1276,41 @@ class Integration:
             number: float = float(value)
         except (TypeError, ValueError, OverflowError):
             return None
-        if number in (1e20, -1e20, 1e100, -1e100):
-            return math.copysign(math.inf, number)
-        infinity_sentinels: tuple[int, ...] = (
-            2**31 - 1,
-            -(2**31),
-            2**63 - 1,
-            -(2**63),
-        )
-        if isinstance(value, int) and value in infinity_sentinels:
+        return number
+
+    def _native_number(
+        self,
+        value: Any | None,
+        native_solver: Any | None,
+    ) -> float | None:
+        number: float | None = self._number(value)
+        if number is None or math.isinf(number):
+            return number
+        solver_infinity: float | None = self._solver_infinity(native_solver)
+        if (
+            solver_infinity is not None
+            and math.isfinite(solver_infinity)
+            and abs(number) == abs(solver_infinity)
+        ):
             return math.copysign(math.inf, number)
         return number
+
+    def _solver_infinity(self, native_solver: Any | None) -> float | None:
+        if native_solver is None:
+            return None
+        module_name: str = type(native_solver).__module__.casefold()
+        if "highspy" in module_name:
+            return self._method_number(native_solver, "getInfinity")
+        if "pyscipopt" in module_name:
+            return self._method_number(native_solver, "infinity")
+        if "gurobi" in module_name:
+            try:
+                engine_module: Any = importlib.import_module("gurobipy")
+            except ImportError:
+                return None
+            except self._solver_exceptions:
+                return None
+            grb_namespace: Any | None = self._read(engine_module, "GRB")[0]
+            infinity_value: Any | None = self._read(grb_namespace, "INFINITY")[0]
+            return self._number(infinity_value)
+        return None
