@@ -6,6 +6,10 @@ from typing import Protocol
 from .models import RunRef, SolveRecord
 
 
+class RunStoreError(Exception):
+    """An error raised when run storage fails."""
+
+
 class RunStore(Protocol):
     """The storage of solve runs in an experiment tracker."""
 

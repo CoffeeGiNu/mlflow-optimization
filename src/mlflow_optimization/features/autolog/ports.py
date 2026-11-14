@@ -6,6 +6,10 @@ from typing import Protocol
 from .models import CompletedSolve, SolveObservation
 
 
+class ObservationError(Exception):
+    """An error raised when a solve observation cannot be built."""
+
+
 class SolveObserver(Protocol):
     """The entry through which an adapter routes a solve call."""
 

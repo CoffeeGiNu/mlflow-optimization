@@ -3,6 +3,10 @@
 from typing import Protocol
 
 
+class ArtifactStoreError(Exception):
+    """An error raised when artifact storage fails."""
+
+
 class ArtifactStore(Protocol):
     """The storage of files attached to runs."""
 
