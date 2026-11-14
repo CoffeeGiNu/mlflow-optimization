@@ -1,6 +1,5 @@
 """Activation of integrations and arbitration of observed solve calls."""
 
-import logging
 from collections.abc import Callable, Iterator, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import replace
@@ -18,7 +17,6 @@ from .ports import SolverIntegration, SolveSink
 
 _solve_indices: Iterator[int] = count(1)
 _solve_index_lock: Lock = Lock()
-_logger: logging.Logger = logging.getLogger("mlflow_optimization")
 
 
 class _SolveScope:
@@ -79,9 +77,6 @@ class AutologManager:
                 """The result of a guarded observation operation."""
                 try:
                     return operation()
-                except Warning as warning:
-                    _logger.warning("%s", warning)
-                    return None
                 # NOTE: A defect in logging must never change the result of the user's solve.
                 except Exception:
                     failures.append("Solve observation failed")
@@ -99,8 +94,6 @@ class AutologManager:
                 observation: SolveObservation | None = None
                 try:
                     observation = extract(result, solve.error)
-                except Warning as warning:
-                    _logger.warning("%s", warning)
                 # NOTE: A defect in extraction must never change the result of the user's solve.
                 except Exception:
                     failures.append("Solve extraction failed")
@@ -120,10 +113,7 @@ class AutologManager:
                 guard(lambda: finish(solve))
                 failure: str
                 for failure in failures:
-                    try:
-                        warn(failure)
-                    except Warning as warning:
-                        _logger.warning("%s", warning)
+                    warn(failure)
                 raise
             end = perf_counter()
             scope.active = False
@@ -134,10 +124,7 @@ class AutologManager:
             )
             guard(lambda: finish(solve))
             for failure in failures:
-                try:
-                    warn(failure)
-                except Warning as warning:
-                    _logger.warning("%s", warning)
+                warn(failure)
             return cast(T, result)
         finally:
             scope.active = False
