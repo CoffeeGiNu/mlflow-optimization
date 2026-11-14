@@ -9,7 +9,7 @@ from typing import Any
 
 from mlflow_optimization.common.patching import Patch
 from mlflow_optimization.features.autolog.models import SolveObservation
-from mlflow_optimization.features.autolog.ports import SolveObserver
+from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
 from mlflow_optimization.features.metadata.models import (
     ParameterOrigin,
     ReportedMetadata,
@@ -45,6 +45,35 @@ class Integration:
 
     def __init__(self) -> None:
         self._patches: list[Patch] = []
+        self._solver_exceptions: tuple[type[Exception], ...] = ()
+
+    def _load_solver_exceptions(self) -> tuple[type[Exception], ...]:
+        error_modules: tuple[tuple[str, tuple[str, ...] | None], ...] = (
+            ("pyomo.common.errors", None),
+            ("gurobipy", ("GurobiError",)),
+            ("highspy", ("HighsError", "HighsStatusError")),
+        )
+        solver_exceptions: list[type[Exception]] = []
+        for module_name, error_names in error_modules:
+            try:
+                error_module: Any = importlib.import_module(module_name)
+            except ImportError:
+                continue
+            error_types: tuple[Any, ...] = (
+                tuple(vars(error_module).values())
+                if error_names is None
+                else tuple(
+                    vars(error_module).get(error_name) for error_name in error_names
+                )
+            )
+            for error_type in error_types:
+                if (
+                    isinstance(error_type, type)
+                    and issubclass(error_type, Exception)
+                    and error_type not in solver_exceptions
+                ):
+                    solver_exceptions.append(error_type)
+        return tuple(solver_exceptions)
 
     def install(self, observer: SolveObserver) -> None:
         """Installation of Pyomo solve hooks."""
@@ -59,6 +88,7 @@ class Integration:
             )
         except ImportError as error:
             raise ImportError("The Pyomo integration requires Pyomo.") from error
+        self._solver_exceptions = self._load_solver_exceptions()
         owners: tuple[type[Any], ...] = (
             OptSolver,
             DirectOrPersistentSolver,
@@ -80,7 +110,9 @@ class Integration:
             try:
                 solver_module: Any = importlib.import_module(module_name)
                 solver_class: Any = getattr(solver_module, class_name)
-            except Exception:
+            except (ImportError, AttributeError):
+                continue
+            except self._solver_exceptions:
                 continue
             if isinstance(solver_class, type):
                 specific_owners.append(solver_class)
@@ -102,18 +134,36 @@ class Integration:
 
                 def factory(original: Callable[..., Any]) -> Callable[..., Any]:
                     @wraps(original)
-                    def wrapped(solver: Any, *args: Any, **kwargs: Any) -> Any:
-                        model: Any | None = args[0] if args else kwargs.get("model")
+                    def wrapped(
+                        solver: Any,
+                        *solve_arguments: Any,
+                        **solve_keywords: Any,
+                    ) -> Any:
+                        model: Any | None = (
+                            solve_arguments[0]
+                            if solve_arguments
+                            else solve_keywords.get("model")
+                        )
 
                         def extract(
                             result: Any | None,
                             error: BaseException | None,
                         ) -> SolveObservation:
-                            return self._extract(solver, model, result, error, kwargs)
+                            return self._extract(
+                                solver,
+                                model,
+                                result,
+                                error,
+                                solve_keywords,
+                            )
 
                         return observer.observe(
                             self.api,
-                            lambda: original(solver, *args, **kwargs),
+                            lambda: original(
+                                solver,
+                                *solve_arguments,
+                                **solve_keywords,
+                            ),
                             extract,
                         )
 
@@ -121,7 +171,7 @@ class Integration:
 
                 patch.install(factory)
                 patches.append(patch)
-        except BaseException:
+        except (AttributeError, TypeError):
             for patch in reversed(patches):
                 patch.uninstall()
             raise
@@ -151,12 +201,17 @@ class Integration:
         error: BaseException | None,
         solve_keywords: Mapping[str, Any],
     ) -> SolveObservation:
-        outcome: ReportedOutcome = self._outcome(solver, result, error)
-        metrics: ReportedMetrics = self._metrics(solver, result, model)
-        metadata: ReportedMetadata = self._metadata(
-            solver, model, result, solve_keywords
-        )
-        return SolveObservation(self.api, outcome, metrics, metadata)
+        try:
+            outcome: ReportedOutcome = self._outcome(solver, result, error)
+            metrics: ReportedMetrics = self._metrics(solver, result, model, error)
+            metadata: ReportedMetadata = self._metadata(
+                solver, model, result, solve_keywords
+            )
+            return SolveObservation(self.api, outcome, metrics, metadata)
+        except self._solver_exceptions as extraction_error:
+            raise ObservationError(
+                "Pyomo solve observation extraction failed."
+            ) from extraction_error
 
     def _outcome(
         self,
@@ -320,7 +375,9 @@ class Integration:
             try:
                 if len(solutions) > 0:
                     return True
-            except Exception:
+            except (AttributeError, TypeError):
+                continue
+            except self._solver_exceptions:
                 continue
         return None
 
@@ -329,6 +386,7 @@ class Integration:
         solver: Any,
         result: Any | None,
         model: Any | None,
+        error: BaseException | None,
     ) -> ReportedMetrics:
         size: dict[str, int] = self._model_size(model)
         objectives: tuple[Any, ...] | None = self._model_objects(model, "Objective")
@@ -336,7 +394,9 @@ class Integration:
             len(objectives) > 0 if objectives is not None else None
         )
         sense: ObjectiveSense | None = self._sense(objectives or ())
-        result_sources: tuple[Any, ...] = self._result_sources(solver, result)
+        result_sources: tuple[Any, ...] = (
+            () if error is not None else self._result_sources(solver, result)
+        )
         has_solution: bool | None = self._has_solution(result_sources)
         objective_value: float | MissingReason = self._objective_value(result_sources)
         if objective_value is MissingReason.UNSUPPORTED:
@@ -348,21 +408,23 @@ class Integration:
         if objective_value is MissingReason.UNSUPPORTED and has_objective is False:
             objective_value = MissingReason.UNDEFINED
         dual_bound: float | MissingReason = self._dual_bound(result_sources, sense)
-        native_solver: Any | None = self._read(solver, "_solver_model")[0]
+        native_solver: Any | None = None
+        if error is None and result is not None:
+            native_solver = self._read(solver, "_solver_model")[0]
         solver_time_seconds: float | MissingReason = self._solver_time(
             result_sources,
             native_solver,
         )
-        solver_info: Any | None = self._solver_info(native_solver)
+        solver_information: Any | None = self._solver_information(native_solver)
         statistics: dict[str, float | MissingReason] = self._statistics(
             result_sources,
             native_solver,
-            solver_info,
+            solver_information,
         )
         native_metrics: dict[str, float] = self._native_metrics(
             result_sources,
             native_solver,
-            solver_info,
+            solver_information,
         )
         if not size:
             size.update(self._result_size(result))
@@ -406,9 +468,12 @@ class Integration:
             variables: tuple[Any, ...] = tuple(
                 model.component_data_objects(variable_type, active=True)
             )
-        except Exception:
+        except (ImportError, AttributeError):
             variables = ()
             variable_count_available: bool = False
+        except self._solver_exceptions:
+            variables = ()
+            variable_count_available = False
         else:
             variable_count_available = True
         try:
@@ -418,9 +483,12 @@ class Integration:
             constraints: tuple[Any, ...] = tuple(
                 model.component_data_objects(constraint_type, active=True)
             )
-        except Exception:
+        except (ImportError, AttributeError):
             constraints = ()
             constraint_count_available: bool = False
+        except self._solver_exceptions:
+            constraints = ()
+            constraint_count_available = False
         else:
             constraint_count_available = True
         integer_count: int = 0
@@ -429,7 +497,9 @@ class Integration:
             for variable in variables:
                 try:
                     is_integer: bool = bool(variable.is_integer())
-                except Exception:
+                except (AttributeError, TypeError):
+                    integer_count_available = False
+                except self._solver_exceptions:
                     integer_count_available = False
                 else:
                     integer_count += int(is_integer)
@@ -455,7 +525,9 @@ class Integration:
             objects: tuple[Any, ...] = tuple(
                 model.component_data_objects(component_type, active=True)
             )
-        except Exception:
+        except (ImportError, AttributeError, TypeError):
+            return None
+        except self._solver_exceptions:
             return None
         return objects
 
@@ -489,7 +561,9 @@ class Integration:
                 if len(solutions) == 0:
                     continue
                 first_solution: Any = solutions[0]
-            except Exception:
+            except (AttributeError, IndexError, KeyError, TypeError):
+                continue
+            except self._solver_exceptions:
                 continue
             objectives: Any | None = self._read(first_solution, "objective")[0]
             if isinstance(objectives, Mapping):
@@ -571,10 +645,7 @@ class Integration:
                 if value is None:
                     continue
                 if isinstance(value, timedelta):
-                    try:
-                        return float(value.total_seconds())
-                    except Exception:
-                        continue
+                    return float(value.total_seconds())
                 number: float | None = self._number(value)
                 if number is not None:
                     return number
@@ -584,7 +655,7 @@ class Integration:
         self,
         result_sources: Sequence[Any],
         native_solver: Any | None,
-        solver_info: Any | None,
+        solver_information: Any | None,
     ) -> dict[str, float | MissingReason]:
         common_paths: Mapping[str, tuple[tuple[str, ...], ...]] = {
             "node_count": (
@@ -612,7 +683,7 @@ class Integration:
         }
         statistics: dict[str, float | MissingReason] = {}
         owners: list[Any | None] = list(result_sources)
-        owners.extend((native_solver, solver_info))
+        owners.extend((native_solver, solver_information))
         for result_source in result_sources:
             solver_result: Any | None = self._read(result_source, "solver")[0]
             if solver_result is not None:
@@ -629,7 +700,7 @@ class Integration:
         self,
         result_sources: Sequence[Any],
         native_solver: Any | None,
-        solver_info: Any | None,
+        solver_information: Any | None,
     ) -> dict[str, float]:
         native_paths: Mapping[str, tuple[tuple[str, ...], ...]] = {
             "reported_gap": (
@@ -649,7 +720,7 @@ class Integration:
         }
         native: dict[str, float] = {}
         owners: list[Any | None] = list(result_sources)
-        owners.extend((native_solver, solver_info))
+        owners.extend((native_solver, solver_information))
         for result_source in result_sources:
             solver_result: Any | None = self._read(result_source, "solver")[0]
             if solver_result is not None:
@@ -675,19 +746,23 @@ class Integration:
             return None
         try:
             value: Any = method()
-        except Exception:
+        except AttributeError:
+            return None
+        except self._solver_exceptions:
             return None
         return self._number(value)
 
-    def _solver_info(self, native_solver: Any | None) -> Any | None:
+    def _solver_information(self, native_solver: Any | None) -> Any | None:
         if native_solver is None:
             return None
-        info_method: Any | None = self._read(native_solver, "getInfo")[0]
-        if not callable(info_method):
+        information_method: Any | None = self._read(native_solver, "getInfo")[0]
+        if not callable(information_method):
             return None
         try:
-            return info_method()
-        except Exception:
+            return information_method()
+        except AttributeError:
+            return None
+        except self._solver_exceptions:
             return None
 
     def _first_number(
@@ -708,9 +783,10 @@ class Integration:
         return None
 
     def _result_sources(self, solver: Any, result: Any | None) -> tuple[Any, ...]:
+        if result is None:
+            return ()
         sources: list[Any] = []
-        if result is not None:
-            sources.append(result)
+        sources.append(result)
         cached_result: Any | None = self._read(solver, "_last_results_object")[0]
         if cached_result is not None and all(
             cached_result is not source for source in sources
@@ -763,13 +839,17 @@ class Integration:
             return (section,)
         try:
             item_count: int = len(section)
-        except Exception:
+        except (AttributeError, TypeError):
+            return ()
+        except self._solver_exceptions:
             return ()
         items: list[Any] = []
         for index in range(item_count):
             try:
                 item: Any = section[index]
-            except Exception:
+            except (AttributeError, IndexError, KeyError, TypeError):
+                continue
+            except self._solver_exceptions:
                 continue
             items.append(item)
         return tuple(items)
@@ -785,7 +865,9 @@ class Integration:
             if key not in owner:
                 return None, MissingReason.UNSUPPORTED
             value: Any = owner[key]
-        except Exception:
+        except (AttributeError, KeyError, TypeError):
+            return None, MissingReason.FAILED
+        except self._solver_exceptions:
             return None, MissingReason.FAILED
         if value is None:
             return None, MissingReason.UNDEFINED
@@ -831,13 +913,13 @@ class Integration:
         if configuration_template is None and configuration is not None:
             try:
                 configuration_template = type(configuration)()
-            except Exception:
+            except TypeError:
                 configuration_template = None
         user_values_member: Any | None = self._read(configuration, "user_values")[0]
         if callable(user_values_member):
             try:
                 configuration_values: Any = tuple(user_values_member())
-            except Exception:
+            except self._solver_exceptions:
                 configuration_values = None
         else:
             configuration_values = user_values_member
@@ -886,7 +968,7 @@ class Integration:
                 if callable(value):
                     try:
                         value = value(accessValue=False)
-                    except Exception:
+                    except self._solver_exceptions:
                         value = None
                 default: Any | None = self._read(parameter_item, "_default")[0]
                 is_user_set: Any | None = self._read(parameter_item, "_userSet")[0]
@@ -956,7 +1038,7 @@ class Integration:
     def _api_version(self) -> str | None:
         try:
             version_module: Any = importlib.import_module("pyomo.version")
-        except Exception:
+        except ImportError:
             return None
         version: Any | None = self._read(version_module, "version")[0]
         return self._string(version)
@@ -974,7 +1056,7 @@ class Integration:
         if engine_module is not None:
             try:
                 module: Any = importlib.import_module(engine_module)
-            except Exception:
+            except ImportError:
                 module = None
             module_version: Any | None = self._read(module, "__version__")[0]
             if module_version is not None:
@@ -997,7 +1079,7 @@ class Integration:
             if callable(version_method):
                 try:
                     version_value: Any = version_method()
-                except Exception:
+                except self._solver_exceptions:
                     return None
                 return self._string(version_value)
         return None
@@ -1011,7 +1093,7 @@ class Integration:
             value: Any = getattr(owner, name)
         except AttributeError:
             return None, MissingReason.UNSUPPORTED
-        except Exception:
+        except self._solver_exceptions:
             return None, MissingReason.FAILED
         if value is None:
             return None, MissingReason.UNDEFINED
@@ -1027,7 +1109,9 @@ class Integration:
             return value
         try:
             return str(value)
-        except Exception:
+        except (TypeError, ValueError):
+            return None
+        except self._solver_exceptions:
             return None
 
     def _string(self, value: Any | None) -> str | None:
@@ -1035,7 +1119,9 @@ class Integration:
             return None
         try:
             return str(value)
-        except Exception:
+        except (TypeError, ValueError):
+            return None
+        except self._solver_exceptions:
             return None
 
     def _number(self, value: Any | None) -> float | None:
