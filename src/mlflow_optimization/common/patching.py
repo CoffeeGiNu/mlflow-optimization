@@ -1,7 +1,17 @@
 """Reversible attribute replacement."""
 
 from collections.abc import Callable
+from collections.abc import Mapping
+from inspect import signature
 from typing import Any
+
+
+def receiver_of(original: Callable[..., Any], args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> Any:
+    """The receiver of a method call."""
+    receiver_name: str = next(iter(signature(original).parameters))
+    if args:
+        return args[0]
+    return kwargs[receiver_name]
 
 
 class Patch:
