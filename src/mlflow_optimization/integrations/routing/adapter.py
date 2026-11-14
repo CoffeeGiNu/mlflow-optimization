@@ -1,7 +1,6 @@
-"""Observation hooks for OR-Tools Routing solves."""
+"""The OR-Tools Routing solver integration."""
 
 from collections.abc import Callable
-from contextlib import suppress
 from functools import wraps
 from typing import Any
 
@@ -10,7 +9,11 @@ from ortools.constraint_solver import pywrapcp
 
 from mlflow_optimization.common.patching import Patch
 from mlflow_optimization.features.autolog.models import SolveObservation
-from mlflow_optimization.features.autolog.ports import SolveObserver, SolverIntegration
+from mlflow_optimization.features.autolog.ports import (
+    ObservationError,
+    SolveObserver,
+    SolverIntegration,
+)
 from mlflow_optimization.features.metadata.models import (
     ParameterOrigin,
     ReportedMetadata,
@@ -56,37 +59,51 @@ def _explicit_parameters(
     defaults: Any,
     prefix: str = "",
 ) -> list[SolverParameter]:
-    """The scalar parameters that differ from OR-Tools defaults."""
+    """Scalar values that differ from OR-Tools search defaults."""
     parameters: list[SolverParameter] = []
     fields: Any = ()
-    with suppress(BaseException):
+    fields_available: bool = False
+    try:
         fields = actual.DESCRIPTOR.fields
+        fields_available = True
+    except AttributeError:
+        fields_available = False
+    if not fields_available:
+        return parameters
     field: Any
     for field in fields:
         parameter_name: str = f"{prefix}.{field.name}" if prefix else field.name
         actual_value_available: bool = False
         actual_value: Any = None
-        with suppress(BaseException):
+        try:
             actual_value = getattr(actual, field.name)
             actual_value_available = True
+        except AttributeError:
+            actual_value_available = False
         default_value_available: bool = False
         default_value: Any = None
-        with suppress(BaseException):
+        try:
             default_value = getattr(defaults, field.name)
             default_value_available = True
+        except AttributeError:
+            default_value_available = False
         if not actual_value_available or not default_value_available:
             continue
         if field.is_repeated:
             actual_values_available: bool = False
             actual_values: list[Any] = []
-            with suppress(BaseException):
+            try:
                 actual_values = list(actual_value)
                 actual_values_available = True
+            except TypeError:
+                actual_values_available = False
             default_values_available: bool = False
             default_values: list[Any] = []
-            with suppress(BaseException):
+            try:
                 default_values = list(default_value)
                 default_values_available = True
+            except TypeError:
+                default_values_available = False
             if not actual_values_available or not default_values_available:
                 continue
             if actual_values != default_values:
@@ -98,12 +115,12 @@ def _explicit_parameters(
                     )
                 )
         elif field.message_type is not None:
-            parameters.extend(_explicit_parameters(actual_value, default_value, parameter_name))
+            parameters.extend(
+                _explicit_parameters(actual_value, default_value, parameter_name)
+            )
         elif actual_value != default_value:
             if field.enum_type is not None:
-                enum_value: Any = None
-                with suppress(BaseException):
-                    enum_value = field.enum_type.values_by_number.get(actual_value)
+                enum_value: Any = field.enum_type.values_by_number.get(actual_value)
                 value: int | float | bool | str = (
                     enum_value.name if enum_value is not None else actual_value
                 )
@@ -129,7 +146,7 @@ class Integration(SolverIntegration):
         self._patches: list[Patch] = []
 
     def install(self, observer: SolveObserver) -> None:
-        """Route the available Routing solve entry points through an observer."""
+        """The solve hooks installed on the Routing model."""
         if self._patches:
             return
         entry_point: str
@@ -140,7 +157,7 @@ class Integration(SolverIntegration):
                 self._patches.append(patch)
 
     def uninstall(self) -> None:
-        """Restore the original Routing solve entry points."""
+        """The original solve hooks after uninstall."""
         patch: Patch
         for patch in reversed(self._patches):
             patch.uninstall()
@@ -173,7 +190,9 @@ class Integration(SolverIntegration):
                     result: Any | None,
                     error: BaseException | None,
                 ) -> SolveObservation:
-                    return self._extract(routing_model, result, error, search_parameters)
+                    return self._extract(
+                        routing_model, result, error, search_parameters
+                    )
 
                 return observer.observe(self.api, call, extract)
 
@@ -187,7 +206,7 @@ class Integration(SolverIntegration):
         arguments: tuple[Any, ...],
         keyword_arguments: dict[str, Any],
     ) -> Any | None:
-        """The search parameters passed to one solve entry point."""
+        """Search parameters for one Routing solve call."""
         if entry_point == "SolveWithParameters":
             parameter_position: int = 0
         elif entry_point in (
@@ -214,8 +233,10 @@ class Integration(SolverIntegration):
         status_code: int | None = None
         raw_status: str = "unknown"
         termination: Termination = Termination.UNKNOWN
-        with suppress(BaseException):
+        try:
             status_code = int(routing_model.status())
+        except (AttributeError, RuntimeError):
+            status_code = None
         if status_code is not None:
             status_name: str = _STATUS_NAMES.get(status_code, "UNKNOWN")
             raw_status = f"{status_name} ({status_code})"
@@ -230,38 +251,48 @@ class Integration(SolverIntegration):
         objective_value: float | MissingReason
         if result is None:
             objective_value = (
-                MissingReason.NO_SOLUTION
-                if error is None
-                else MissingReason.FAILED
+                MissingReason.NO_SOLUTION if error is None else MissingReason.FAILED
             )
         else:
             objective_value = MissingReason.FAILED
-            with suppress(BaseException):
+            try:
                 objective_value = float(result.ObjectiveValue())
+            except (AttributeError, RuntimeError):
+                objective_value = MissingReason.FAILED
         solver_time_seconds: float | MissingReason = MissingReason.FAILED
-        with suppress(BaseException):
+        try:
             solver_time_seconds = float(routing_model.solver().WallTime()) / 1000.0
+        except (AttributeError, RuntimeError):
+            solver_time_seconds = MissingReason.FAILED
         stats: dict[str, float | MissingReason] = {}
         native: dict[str, float] = {}
         branches: float | None = None
-        with suppress(BaseException):
+        try:
             branches = float(routing_model.solver().Branches())
+        except (AttributeError, RuntimeError):
+            branches = None
         if branches is not None:
             native["branches"] = branches
         failures: float | None = None
-        with suppress(BaseException):
+        try:
             failures = float(routing_model.solver().Failures())
+        except (AttributeError, RuntimeError):
+            failures = None
         if failures is not None:
             native["failures"] = failures
         problem: dict[str, int] = {}
         num_locations: int | None = None
-        with suppress(BaseException):
+        try:
             num_locations = int(routing_model.nodes())
+        except (AttributeError, RuntimeError):
+            num_locations = None
         if num_locations is not None:
             problem["num_locations"] = num_locations
         vehicle_count: int | None = None
-        with suppress(BaseException):
+        try:
             vehicle_count = int(routing_model.vehicles())
+        except (AttributeError, RuntimeError):
+            vehicle_count = None
         if vehicle_count is not None:
             problem["num_vehicles"] = vehicle_count
         if result is not None and vehicle_count is not None:
@@ -271,9 +302,13 @@ class Integration(SolverIntegration):
             for vehicle_index in range(vehicle_count):
                 vehicle_read_succeeded: bool = False
                 is_vehicle_used: bool = False
-                with suppress(BaseException):
-                    is_vehicle_used = bool(routing_model.IsVehicleUsed(result, vehicle_index))
+                try:
+                    is_vehicle_used = bool(
+                        routing_model.IsVehicleUsed(result, vehicle_index)
+                    )
                     vehicle_read_succeeded = True
+                except (AttributeError, RuntimeError, TypeError):
+                    vehicle_read_succeeded = False
                 if not vehicle_read_succeeded:
                     vehicle_reads_succeeded = False
                 elif is_vehicle_used:
@@ -281,34 +316,49 @@ class Integration(SolverIntegration):
             if vehicle_reads_succeeded:
                 native["vehicles_used"] = float(vehicles_used)
         if search_parameters is None:
-            with suppress(BaseException):
+            try:
                 search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+            except (AttributeError, RuntimeError):
+                search_parameters = None
         parameters: list[SolverParameter] = []
         if search_parameters is not None:
             defaults: Any | None = None
-            with suppress(BaseException):
+            try:
                 defaults = pywrapcp.DefaultRoutingSearchParameters()
+            except (AttributeError, RuntimeError):
+                defaults = None
             if defaults is not None:
                 parameters = _explicit_parameters(search_parameters, defaults)
-        observation: SolveObservation = SolveObservation(
-            api=self.api,
-            outcome=ReportedOutcome(raw_status, termination, has_solution),
-            metrics=ReportedMetrics(
-                has_objective=True,
-                sense=ObjectiveSense.MINIMIZE,
-                objective_value=objective_value,
-                dual_bound=MissingReason.UNSUPPORTED,
-                solver_time_seconds=solver_time_seconds,
-                stats=stats,
-                native=native,
-            ),
-            metadata=ReportedMetadata(
-                solver="routing",
-                api_version=ortools.__version__,
-                solver_version=ortools.__version__,
-                problem=problem,
-                parameters=parameters,
-                wall_time_includes_model_build=False,
-            ),
-        )
+        api_version: str | None = None
+        try:
+            api_version = str(ortools.__version__)
+        except AttributeError:
+            api_version = None
+        construction_error: TypeError | ValueError
+        try:
+            observation: SolveObservation = SolveObservation(
+                api=self.api,
+                outcome=ReportedOutcome(raw_status, termination, has_solution),
+                metrics=ReportedMetrics(
+                    has_objective=True,
+                    sense=ObjectiveSense.MINIMIZE,
+                    objective_value=objective_value,
+                    dual_bound=MissingReason.UNSUPPORTED,
+                    solver_time_seconds=solver_time_seconds,
+                    stats=stats,
+                    native=native,
+                ),
+                metadata=ReportedMetadata(
+                    solver="routing",
+                    api_version=api_version,
+                    solver_version=api_version,
+                    problem=problem,
+                    parameters=parameters,
+                    wall_time_includes_model_build=False,
+                ),
+            )
+        except (TypeError, ValueError) as construction_error:
+            raise ObservationError(
+                "Could not build a Routing observation."
+            ) from construction_error
         return observation
