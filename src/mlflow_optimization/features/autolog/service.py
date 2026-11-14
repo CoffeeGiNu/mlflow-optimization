@@ -1,20 +1,23 @@
 """Activation of integrations and arbitration of observed solve calls."""
 
-from collections.abc import Callable, Sequence
+import warnings
+from collections.abc import Callable, Iterator, Sequence
 from contextvars import ContextVar, Token
+from dataclasses import replace
 from itertools import count
 from threading import Lock
 from time import perf_counter, time
+from typing import cast
 from uuid import uuid4
 
-from mlflow_optimization.common.diagnostics import warn
+from mlflow_optimization.common.diagnostics import MlflowOptimizationWarning, warn
 
 from .models import CompletedSolve, SolveObservation
-from .ports import SolverIntegration, SolveSink
+from .ports import ObservationError, SolverIntegration, SolveSink
 
 
-_solve_indices = count(1)
-_solve_index_lock = Lock()
+_solve_indices: Iterator[int] = count(1)
+_solve_index_lock: Lock = Lock()
 _observing: ContextVar[bool] = ContextVar("autolog_observing", default=False)
 
 
@@ -28,6 +31,7 @@ class AutologManager:
 
     def enable(self, integrations: Sequence[SolverIntegration]) -> None:
         """Observe exactly the given integrations."""
+        integration: SolverIntegration
         for integration in self._integrations[:]:
             if not any(integration is candidate for candidate in integrations):
                 integration.uninstall()
@@ -41,6 +45,7 @@ class AutologManager:
     def disable(self) -> None:
         """Stop observing and uninstall every integration."""
         self._enabled = False
+        integration: SolverIntegration
         for integration in self._integrations[:]:
             integration.uninstall()
             self._integrations.remove(integration)
@@ -57,52 +62,58 @@ class AutologManager:
         token: Token[bool] = _observing.set(True)
         try:
             failures: list[str] = []
-            context: object = None
-            try:
-                context = self._sink.begin()
-            except BaseException:
-                failures.append("Solve sink begin failed")
+
+            def guard(operation: Callable[[], object]) -> object:
+                """The result of a guarded observation operation."""
+                try:
+                    return operation()
+                # NOTE: A defect in logging must never change the result of the user's solve.
+                except Exception:
+                    failures.append("Solve observation failed")
+                    return None
+
+            context: object = guard(self._sink.begin)
             with _solve_index_lock:
                 solve_index: int = next(_solve_indices)
             solve_id: str = uuid4().hex
             start_time_ms: int = int(time() * 1000)
+            result: T | None = None
+
+            def finish(solve: CompletedSolve) -> None:
+                """Extract and record a completed solve."""
+                observation: SolveObservation | None = None
+                try:
+                    observation = extract(result, solve.error)
+                except ObservationError:
+                    failures.append("Solve extraction failed")
+                self._sink.record(replace(solve, observation=observation), context)
+
             start: float = perf_counter()
             try:
-                result: T = call()
+                result = call()
             except BaseException as error:
                 end: float = perf_counter()
                 end_time_ms: int = int(time() * 1000)
-                self._finish(api, solve_id, solve_index, start_time_ms, end_time_ms, end - start, None, error, extract, context, failures)
-                for failure in failures:
-                    try:
+                solve: CompletedSolve = CompletedSolve(
+                    api, solve_id, solve_index, start_time_ms, end_time_ms,
+                    end - start, None, error,
+                )
+                guard(lambda: finish(solve))
+                with warnings.catch_warnings():
+                    warnings.simplefilter("always", MlflowOptimizationWarning)
+                    failure: str
+                    for failure in failures:
                         warn(failure)
-                    except BaseException:
-                        pass
                 raise
             end = perf_counter()
             end_time_ms = int(time() * 1000)
-            self._finish(api, solve_id, solve_index, start_time_ms, end_time_ms, end - start, result, None, extract, context, failures)
+            solve = CompletedSolve(
+                api, solve_id, solve_index, start_time_ms, end_time_ms,
+                end - start, None, None,
+            )
+            guard(lambda: finish(solve))
             for failure in failures:
                 warn(failure)
-            return result
+            return cast(T, result)
         finally:
             _observing.reset(token)
-
-    def _finish[T](
-        self, api: str, solve_id: str, solve_index: int, start_time_ms: int,
-        end_time_ms: int, wall_time_seconds: float, result: T | None,
-        error: BaseException | None,
-        extract: Callable[[T | None, BaseException | None], SolveObservation],
-        context: object, failures: list[str],
-    ) -> None:
-        """Extract and record a completed solve."""
-        observation: SolveObservation | None = None
-        try:
-            observation = extract(result, error)
-        except BaseException:
-            failures.append("Solve extraction failed")
-        solve: CompletedSolve = CompletedSolve(api, solve_id, solve_index, start_time_ms, end_time_ms, wall_time_seconds, observation, error)
-        try:
-            self._sink.record(solve, context)
-        except BaseException:
-            failures.append("Solve sink record failed")
