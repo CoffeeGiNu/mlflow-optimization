@@ -43,6 +43,8 @@ def _is_safe_parameter(parameter: SolverParameter) -> bool:
         for name_part in name_parts:
             if name_part == sensitive_part:
                 return False
+            if sensitive_part == "key" and sensitive_part in name_part:
+                return False
             if sensitive_part == "dir" and name_part.endswith("dir"):
                 return False
             if sensitive_part not in ("key", "log", "dir") and (
