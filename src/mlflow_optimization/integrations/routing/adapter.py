@@ -8,12 +8,12 @@ import ortools
 from ortools.constraint_solver import pywrapcp
 
 from mlflow_optimization.common.patching import Patch
-from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.autolog.ports import (
     ObservationError,
     SolveObserver,
     SolverIntegration,
 )
+from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.metadata.types import (
     ParameterOrigin,
     ReportedMetadata,
@@ -42,7 +42,7 @@ _STATUS_TERMINATIONS: dict[int, Termination] = {
     2: Termination.FEASIBLE,
     3: Termination.UNKNOWN,
     4: Termination.TIME_LIMIT,
-    5: Termination.UNKNOWN,
+    5: Termination.ERROR,
     6: Termination.INFEASIBLE,
     7: Termination.OPTIMAL,
 }
@@ -51,6 +51,8 @@ _ENTRY_POINTS: tuple[str, ...] = (
     "Solve",
     "SolveFromAssignmentWithParameters",
     "SolveFromAssignmentsWithParameters",
+    "SolveWithIteratedLocalSearch",
+    "FastSolveFromAssignmentWithParameters",
 )
 
 
@@ -207,11 +209,12 @@ class Integration(SolverIntegration):
         keyword_arguments: dict[str, Any],
     ) -> Any | None:
         """Search parameters for one Routing solve call."""
-        if entry_point == "SolveWithParameters":
+        if entry_point in ("SolveWithParameters", "SolveWithIteratedLocalSearch"):
             parameter_position: int = 0
         elif entry_point in (
             "SolveFromAssignmentWithParameters",
             "SolveFromAssignmentsWithParameters",
+            "FastSolveFromAssignmentWithParameters",
         ):
             parameter_position = 1
         else:
@@ -247,6 +250,10 @@ class Integration(SolverIntegration):
                 if isinstance(error, KeyboardInterrupt)
                 else Termination.ERROR
             )
+        elif result is not None:
+            termination = (
+                Termination.OPTIMAL if status_code == 7 else Termination.FEASIBLE
+            )
         has_solution: bool | None = result is not None if error is None else None
         objective_value: float | MissingReason
         if result is None:
@@ -259,11 +266,7 @@ class Integration(SolverIntegration):
                 objective_value = float(result.ObjectiveValue())
             except (AttributeError, RuntimeError):
                 objective_value = MissingReason.FAILED
-        solver_time_seconds: float | MissingReason = MissingReason.FAILED
-        try:
-            solver_time_seconds = float(routing_model.solver().WallTime()) / 1000.0
-        except (AttributeError, RuntimeError):
-            solver_time_seconds = MissingReason.FAILED
+        solver_time_seconds: float | MissingReason = MissingReason.UNSUPPORTED
         statistics: dict[str, float | MissingReason] = {}
         native: dict[str, float] = {}
         branches: float | None = None
