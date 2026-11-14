@@ -46,7 +46,6 @@ class Integration:
         self._observer = observer
         if self._patches:
             return
-        entry_point: str
         for entry_point in self._entry_points:
             if not hasattr(cp_model.CpSolver, entry_point):
                 continue
@@ -55,7 +54,6 @@ class Integration:
             self._patches.append(patch)
 
     def uninstall(self) -> None:
-        patch: Patch
         for patch in reversed(self._patches):
             patch.uninstall()
         self._patches.clear()
@@ -67,9 +65,8 @@ class Integration:
             observer: SolveObserver | None = self._observer
             if observer is None:
                 return original(*args, **kwargs)
-            try:
-                solver: Any = receiver_of(original, args, kwargs)
-            except KeyError:
+            solver: Any | None = receiver_of(original, args, kwargs)
+            if solver is None:
                 return original(*args, **kwargs)
             model: Any | None = kwargs.get("model")
             if model is None and len(args) > 1:
@@ -95,9 +92,6 @@ class Integration:
         result: Any | None,
         error: BaseException | None,
     ) -> SolveObservation:
-        extraction_error: (
-            AttributeError | RuntimeError | TypeError | ValueError | OverflowError
-        )
         try:
             outcome: ReportedOutcome = self._read_outcome(
                 solver,
@@ -113,13 +107,7 @@ class Integration:
             )
             metadata: ReportedMetadata = self._read_metadata(solver, model)
             return SolveObservation(self.api, outcome, metrics, metadata)
-        except (
-            AttributeError,
-            RuntimeError,
-            TypeError,
-            ValueError,
-            OverflowError,
-        ) as extraction_error:
+        except Exception as extraction_error:
             raise ObservationError(
                 "Could not build a CP-SAT solve observation."
             ) from extraction_error
@@ -173,11 +161,11 @@ class Integration:
         if status_name == "unknown":
             try:
                 status_name = str(result.name)
-            except (AttributeError, RuntimeError):
+            except Exception:
                 status_name = "unknown"
         try:
             status_code: int = int(result)
-        except (TypeError, ValueError, OverflowError):
+        except Exception:
             return status_name
         if status_name == "unknown":
             return f"unknown ({status_code})"
@@ -192,11 +180,11 @@ class Integration:
             return None
         try:
             variable_count: int = len(model.proto.variables)
-        except (AttributeError, RuntimeError, TypeError):
+        except Exception:
             return None
         try:
             solution_count: int = len(solver.response_proto.solution)
-        except (AttributeError, RuntimeError, TypeError):
+        except Exception:
             return None
         if variable_count == 0:
             return None
@@ -230,7 +218,7 @@ class Integration:
             solver_time_seconds: float | MissingReason = MissingReason.FAILED
             native: dict[str, float] = {}
         else:
-            solver_time_seconds = self._read_solver_time(solver)
+            solver_time_seconds = self._read_response_metric(solver, "wall_time")
             native = self._read_native_metrics(solver)
         return ReportedMetrics(
             has_objective=has_objective,
@@ -247,21 +235,21 @@ class Integration:
             return None
         try:
             model_proto: Any = model.proto
-        except (AttributeError, RuntimeError):
+        except Exception:
             return None
         has_floating_point_objective: bool | None = None
         try:
             has_floating_point_objective = bool(
                 model_proto.has_floating_point_objective()
             )
-        except (AttributeError, RuntimeError, TypeError):
+        except Exception:
             pass
         if has_floating_point_objective is True:
             return True
         has_integer_objective: bool | None = None
         try:
             has_integer_objective = bool(model_proto.has_objective())
-        except (AttributeError, RuntimeError, TypeError):
+        except Exception:
             pass
         if has_integer_objective is True:
             return True
@@ -278,28 +266,28 @@ class Integration:
             return None
         try:
             model_proto: Any = model.proto
-        except (AttributeError, RuntimeError, TypeError, ValueError, OverflowError):
+        except Exception:
             return None
         has_floating_point_objective: bool | None = None
         try:
             has_floating_point_objective = bool(
                 model_proto.has_floating_point_objective()
             )
-        except (AttributeError, RuntimeError, TypeError):
+        except Exception:
             pass
         if has_floating_point_objective is True:
             try:
                 maximize: bool = bool(
                     model_proto.floating_point_objective.maximize
                 )
-            except (AttributeError, RuntimeError, TypeError):
+            except Exception:
                 return None
             return ObjectiveSense.MAXIMIZE if maximize else ObjectiveSense.MINIMIZE
         if has_floating_point_objective is not False:
             return None
         try:
             scaling_factor: float = float(model_proto.objective.scaling_factor)
-        except (AttributeError, RuntimeError, TypeError, ValueError, OverflowError):
+        except Exception:
             return None
         if scaling_factor < 0:
             return ObjectiveSense.MAXIMIZE
@@ -337,9 +325,6 @@ class Integration:
             return value
         return MissingReason.UNDEFINED
 
-    def _read_solver_time(self, solver: Any) -> float | MissingReason:
-        return self._read_response_metric(solver, "wall_time")
-
     def _read_response_metric(
         self,
         solver: Any,
@@ -348,7 +333,7 @@ class Integration:
         try:
             response: Any = solver.response_proto
             value: float = float(getattr(response, name))
-        except (AttributeError, RuntimeError, TypeError, ValueError, OverflowError):
+        except Exception:
             return MissingReason.FAILED
         return value
 
@@ -368,7 +353,6 @@ class Integration:
             "gap_integral",
         )
         native: dict[str, float] = {}
-        name: str
         for name in native_fields:
             metric_value: float | MissingReason = self._read_response_metric(
                 solver,
@@ -395,7 +379,7 @@ class Integration:
             return {}
         try:
             model_proto: Any = model.proto
-        except (AttributeError, RuntimeError):
+        except Exception:
             return {}
         problem: dict[str, int] = {}
         variables: Any | None = None
@@ -404,22 +388,21 @@ class Integration:
             variable_count: int = len(variables)
             problem["num_variables"] = variable_count
             problem["num_integer_variables"] = variable_count
-        except (AttributeError, RuntimeError, TypeError):
+        except Exception:
             variables = None
         try:
             problem["num_constraints"] = len(model_proto.constraints)
-        except (AttributeError, RuntimeError, TypeError):
+        except Exception:
             pass
         if variables is not None:
             boolean_variable_count: int = 0
             boolean_variable_count_known: bool = True
-            variable: Any
             for variable in variables:
                 try:
                     domain: list[int] = list(variable.domain)
                     if domain == [0, 1]:
                         boolean_variable_count += 1
-                except (AttributeError, RuntimeError, TypeError, ValueError):
+                except Exception:
                     boolean_variable_count_known = False
             if boolean_variable_count_known:
                 problem["num_boolean_variables"] = boolean_variable_count
@@ -429,11 +412,12 @@ class Integration:
         try:
             configured_parameters: Any = solver.parameters
             default_parameters: Any = sat_parameters_pb2.SatParameters()
-        except (AttributeError, RuntimeError):
+        except Exception:
             return ()
         parameters: list[SolverParameter] = []
-        field: Any
+        parameter: SolverParameter | None
         for field in sat_parameters_pb2.SatParameters.DESCRIPTOR.fields:
+            parameter = None
             try:
                 configured_value: Any = getattr(configured_parameters, field.name)
                 default_value: Any = getattr(default_parameters, field.name)
@@ -446,17 +430,11 @@ class Integration:
                     configured_value,
                     field,
                 )
-                parameters.append(
-                    SolverParameter(field.name, value, ParameterOrigin.EXPLICIT)
-                )
-            except (
-                AttributeError,
-                RuntimeError,
-                TypeError,
-                ValueError,
-                OverflowError,
-            ):
-                continue
+                parameter = SolverParameter(field.name, value, ParameterOrigin.EXPLICIT)
+            except Exception:
+                parameter = None
+            if parameter is not None:
+                parameters.append(parameter)
         return tuple(parameters)
 
     def _parameter_value(self, value: Any, field: Any) -> int | float | str | bool:
@@ -464,7 +442,6 @@ class Integration:
             if field.enum_type is None:
                 return str(list(value))
             enum_values: list[str | int] = []
-            number: int
             for number in value:
                 enum_value: Any | None = field.enum_type.values_by_number.get(number)
                 enum_values.append(
@@ -477,8 +454,6 @@ class Integration:
             if enum_value is not None:
                 return str(enum_value.name)
             return number
-        if isinstance(value, bool):
-            return value
         if isinstance(value, int | float | str):
             return value
         return str(value)
