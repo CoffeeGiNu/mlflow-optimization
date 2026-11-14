@@ -1,18 +1,17 @@
 """The PySCIPOpt solver integration."""
 
-import ast
 import math
 import sys
-import tempfile
 from collections.abc import Callable
-from pathlib import Path
+from functools import wraps
+from inspect import Signature, signature
 from types import ModuleType
 from typing import Any
 
 import pyscipopt
 import pyscipopt.scip
-from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
+from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.metadata.types import (
     ParameterOrigin,
     ReportedMetadata,
@@ -42,6 +41,10 @@ _OBSERVATION_BUILD_ERRORS: tuple[type[Exception], ...] = (
     *_OBJECTIVE_VALUE_ERRORS,
     LookupError,
     OSError,
+)
+_PARAMETER_READ_ERRORS: tuple[type[Exception], ...] = (
+    *_PYSCIPOPT_READ_ERRORS,
+    LookupError,
 )
 
 _STATUS_TERMINATIONS: dict[str, Termination] = {
@@ -79,36 +82,36 @@ class Integration:
         self._rebound_names: list[tuple[ModuleType, str]] = []
 
     def install(self, observer: SolveObserver) -> None:
-        """Install a logging subclass in PySCIPOpt model references."""
+        """A patch that replaces model references with an observing subclass."""
         if self._installed:
             self._observer = observer
             return
 
         original_model: type[Any] = pyscipopt.Model
         integration: Integration = self
+        default_parameters: dict[str, bool | int | float | str] | None = (
+            _read_default_parameters(original_model)
+        )
 
         class LoggingModel(original_model):
             """A PySCIPOpt model that observes optimization calls."""
 
-            def optimize(model: Any) -> Any:
-                if not integration._installed or integration._observer is None:
-                    return super(LoggingModel, model).optimize()
-
-                def call() -> Any:
-                    return super(LoggingModel, model).optimize()
-
-                def extract(
-                    result: Any | None, error: BaseException | None
-                ) -> SolveObservation:
-                    extraction_error: Exception
-                    try:
-                        return _extract_observation(model, result, error)
-                    except _OBSERVATION_BUILD_ERRORS as extraction_error:
-                        raise ObservationError(
-                            "Could not build a PySCIPOpt solve observation."
-                        ) from extraction_error
-
-                return integration._observer.observe(integration.api, call, extract)
+        entry_point_names: tuple[str, ...] = (
+            "optimize",
+            "optimizeNogil",
+            "solveConcurrent",
+        )
+        entry_point_name: str
+        for entry_point_name in entry_point_names:
+            original_entry_point: Any = getattr(original_model, entry_point_name, None)
+            if not callable(original_entry_point):
+                continue
+            observed_entry_point: Callable[..., Any] = _wrap_solve_entry_point(
+                original_entry_point,
+                integration,
+                default_parameters,
+            )
+            setattr(LoggingModel, entry_point_name, observed_entry_point)
 
         logging_model: type[Any] = LoggingModel
         rebound_names: list[tuple[ModuleType, str]] = []
@@ -136,7 +139,7 @@ class Integration:
         self._installed = True
 
     def uninstall(self) -> None:
-        """Restore the original PySCIPOpt model references."""
+        """The restoration of original PySCIPOpt model references."""
         if not self._installed:
             return
 
@@ -169,10 +172,59 @@ class Integration:
         self._rebound_names = []
 
 
+def _wrap_solve_entry_point(
+    original_entry_point: Callable[..., Any],
+    integration: Integration,
+    default_parameters: dict[str, bool | int | float | str] | None,
+) -> Callable[..., Any]:
+    """An observed wrapper for one original PySCIPOpt solve entry point."""
+    original_signature: Signature = signature(original_entry_point)
+
+    @wraps(original_entry_point)
+    def observed_entry_point(
+        model: Any,
+        *arguments: Any,
+        **keyword_arguments: Any,
+    ) -> Any:
+        original_signature.bind(model, *arguments, **keyword_arguments)
+        if not integration._installed or integration._observer is None:
+            return original_entry_point(model, *arguments, **keyword_arguments)
+
+        # NOTE: SCIP changes parameters while solving, so capture configured values first.
+        parameters_before_solve: tuple[SolverParameter, ...] = _read_parameters(
+            model,
+            default_parameters,
+        )
+
+        def call() -> Any:
+            return original_entry_point(model, *arguments, **keyword_arguments)
+
+        def extract(
+            result: Any | None, error: BaseException | None
+        ) -> SolveObservation:
+            extraction_error: Exception
+            try:
+                return _extract_observation(
+                    model,
+                    result,
+                    error,
+                    parameters_before_solve,
+                )
+            except _OBSERVATION_BUILD_ERRORS as extraction_error:
+                raise ObservationError(
+                    "Could not build a PySCIPOpt solve observation."
+                ) from extraction_error
+
+        return integration._observer.observe(integration.api, call, extract)
+
+    return observed_entry_point
+
+
 def _extract_observation(
     model: Any,
     result: Any | None,
     error: BaseException | None,
+    parameters_before_solve: tuple[SolverParameter, ...],
 ) -> SolveObservation:
     """The SDK-free observation of one PySCIPOpt optimization call."""
     raw_status: str = _read_value(lambda: str(model.getStatus()), "unknown")
@@ -204,12 +256,20 @@ def _extract_observation(
         objective_value: float | MissingReason = MissingReason.UNDEFINED
         dual_bound: float | MissingReason = MissingReason.UNDEFINED
     else:
-        dual_bound = _read_number(lambda: float(model.getDualbound()))
+        solver_infinity: float | MissingReason = _read_number(
+            lambda: float(model.infinity())
+        )
+        dual_bound = _read_scip_number(
+            lambda: float(model.getDualbound()),
+            solver_infinity,
+        )
         if has_solution is False:
             objective_value = MissingReason.NO_SOLUTION
         else:
-            objective_value = _read_number(
-                lambda: float(model.getObjVal()), _OBJECTIVE_VALUE_ERRORS
+            objective_value = _read_scip_number(
+                lambda: float(model.getObjVal()),
+                solver_infinity,
+                _OBJECTIVE_VALUE_ERRORS,
             )
 
     solver_time_seconds: float | MissingReason = _read_number(
@@ -233,8 +293,13 @@ def _extract_observation(
         native, "total_time_seconds", lambda: float(model.getTotalTime())
     )
 
-    if has_solution is not False:
-        _add_native_number(native, "gap", lambda: float(model.getGap()))
+    if has_solution is not False and has_objective is not False:
+        gap: float | MissingReason = _read_scip_number(
+            lambda: float(model.getGap()),
+            solver_infinity,
+        )
+        if not isinstance(gap, MissingReason):
+            native["gap"] = gap
 
     metrics: ReportedMetrics = ReportedMetrics(
         has_objective=has_objective,
@@ -245,7 +310,7 @@ def _extract_observation(
         statistics=statistics,
         native=native,
     )
-    metadata: ReportedMetadata = _read_metadata(model)
+    metadata: ReportedMetadata = _read_metadata(model, parameters_before_solve)
     outcome: ReportedOutcome = ReportedOutcome(
         raw_status=raw_status,
         termination=termination,
@@ -277,7 +342,10 @@ def _read_has_objective(model: Any) -> bool | None:
     return None
 
 
-def _read_metadata(model: Any) -> ReportedMetadata:
+def _read_metadata(
+    model: Any,
+    parameters: tuple[SolverParameter, ...],
+) -> ReportedMetadata:
     """The solver and problem metadata reported by PySCIPOpt."""
     api_version: str | None = _read_value(lambda: str(pyscipopt.__version__), None)
     major_version: int | None = _read_value(lambda: int(model.getMajorVersion()), None)
@@ -329,8 +397,6 @@ def _read_metadata(model: Any) -> ReportedMetadata:
         if integer_variable_count_available:
             problem["num_integer_variables"] = integer_variable_count
 
-    parameters: tuple[SolverParameter, ...] = _read_parameters(model)
-
     return ReportedMetadata(
         solver="scip",
         api_version=api_version,
@@ -341,45 +407,65 @@ def _read_metadata(model: Any) -> ReportedMetadata:
     )
 
 
-def _read_parameters(model: Any) -> tuple[SolverParameter, ...]:
-    """The PySCIPOpt parameters that differ from their defaults."""
-    temporary_directory: str
+def _read_default_parameters(
+    model_class: type[Any],
+) -> dict[str, bool | int | float | str] | None:
+    """The PySCIPOpt parameter values of a new model."""
+    defaults_model: Any | MissingReason = _read_value(
+        lambda: model_class(),
+        MissingReason.FAILED,
+    )
+    if isinstance(defaults_model, MissingReason):
+        return None
+
+    default_values: dict[str, Any] | MissingReason
     try:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            parameter_path: Path = Path(temporary_directory) / "changed_parameters.set"
-            # NOTE: PySCIPOpt exposes changed-only parameter values through its parameter writer.
-            model.writeParams(
-                str(parameter_path), comments=False, onlychanged=True, verbose=False
-            )
-            parameter_lines: list[str] = parameter_path.read_text(
-                encoding="utf-8"
-            ).splitlines()
-    except (MemoryError, OSError, ValueError):
+        default_values = _read_value(
+            lambda: defaults_model.getParams(),
+            MissingReason.FAILED,
+        )
+    finally:
+        _read_value(lambda: defaults_model.free(), None)
+
+    if isinstance(default_values, MissingReason) or not isinstance(
+        default_values, dict
+    ):
+        return None
+
+    default_parameters: dict[str, bool | int | float | str] = {}
+    parameter_name: Any
+    parameter_value: Any
+    for parameter_name, parameter_value in default_values.items():
+        if isinstance(parameter_name, str) and isinstance(
+            parameter_value,
+            (bool, int, float, str),
+        ):
+            default_parameters[parameter_name] = parameter_value
+    return default_parameters
+
+
+def _read_parameters(
+    model: Any,
+    default_parameters: dict[str, bool | int | float | str] | None,
+) -> tuple[SolverParameter, ...]:
+    """The PySCIPOpt parameters that differ from their defaults."""
+    if default_parameters is None:
         return ()
 
     parameters: list[SolverParameter] = []
-    parameter_line: str
-    for parameter_line in parameter_lines:
-        stripped_line: str = parameter_line.strip()
-        if not stripped_line or stripped_line.startswith("#"):
-            continue
-        parameter_name: str
-        separator: str
-        parameter_value_text: str
-        parameter_name, separator, parameter_value_text = stripped_line.partition("=")
-        if not separator:
-            continue
-        parameter_name = parameter_name.strip()
-        if not parameter_name:
-            continue
-        parameter_value: int | float | str | bool = _parse_parameter_value(
-            parameter_value_text
+    parameter_name: str
+    default_value: bool | int | float | str
+    for parameter_name, default_value in default_parameters.items():
+        parameter_value: Any | MissingReason = _read_value(
+            lambda parameter_name=parameter_name: model.getParam(parameter_name),
+            MissingReason.FAILED,
+            _PARAMETER_READ_ERRORS,
         )
-        if (
-            parameter_name == "propagating/genvbounds/timingmask"
-            and parameter_value == 0
-        ):
-            # NOTE: PySCIPOpt applies this model-construction default to every new model.
+        if isinstance(parameter_value, MissingReason):
+            continue
+        if not isinstance(parameter_value, (bool, int, float, str)):
+            continue
+        if parameter_value == default_value:
             continue
         parameters.append(
             SolverParameter(
@@ -392,48 +478,42 @@ def _read_parameters(model: Any) -> tuple[SolverParameter, ...]:
     return tuple(parameters)
 
 
-def _parse_parameter_value(parameter_value_text: str) -> int | float | str | bool:
-    """A SCIP parameter value parsed from its changed-parameter file."""
-    stripped_value: str = parameter_value_text.strip()
-    normalized_value: str = stripped_value.lower()
-    if normalized_value == "true":
-        return True
-    if normalized_value == "false":
-        return False
-    try:
-        parsed_value: Any = ast.literal_eval(stripped_value)
-    except (SyntaxError, ValueError):
-        return stripped_value
-    if isinstance(parsed_value, (bool, int, float, str)):
-        return parsed_value
-    return stripped_value
-
-
 def _add_native_number(
     native: dict[str, float],
-    name: str,
+    metric_name: str,
     reader: Callable[[], float],
 ) -> None:
-    """Add one available SCIP-specific number to native metrics."""
+    """One available SCIP-specific metric in native metrics."""
     value: float | MissingReason = _read_number(reader)
     if isinstance(value, MissingReason):
         return
-    native[name] = value
+    native[metric_name] = value
 
 
 def _read_number(
     reader: Callable[[], float],
     read_errors: tuple[type[Exception], ...] = _PYSCIPOPT_READ_ERRORS,
 ) -> float | MissingReason:
-    """A SCIP numeric value with its infinity sentinels normalized."""
-    value: float | MissingReason = _read_value(
-        reader, MissingReason.FAILED, read_errors
-    )
+    """A guarded PySCIPOpt numeric value."""
+    return _read_value(reader, MissingReason.FAILED, read_errors)
+
+
+def _read_scip_number(
+    reader: Callable[[], float],
+    solver_infinity: float | MissingReason,
+    read_errors: tuple[type[Exception], ...] = _PYSCIPOPT_READ_ERRORS,
+) -> float | MissingReason:
+    """A PySCIPOpt numeric value with its infinity sentinel normalized."""
+    value: float | MissingReason = _read_number(reader, read_errors)
     if isinstance(value, MissingReason):
         return value
-    if value >= 1e20:
+    if math.isinf(value):
+        return value
+    if isinstance(solver_infinity, MissingReason) or solver_infinity <= 0.0:
+        return MissingReason.FAILED
+    if value >= solver_infinity:
         return math.inf
-    if value <= -1e20:
+    if value <= -solver_infinity:
         return -math.inf
     return value
 
@@ -443,7 +523,7 @@ def _read_value[Value](
     unavailable: Value,
     read_errors: tuple[type[Exception], ...] = _PYSCIPOPT_READ_ERRORS,
 ) -> Value:
-    """A solver value read without interrupting the remaining extraction."""
+    """A PySCIPOpt value or its fallback after a supported read error."""
     try:
         return reader()
     except read_errors:
