@@ -49,6 +49,33 @@ PARAMETER_CONTROL_NAMES: frozenset[str] = frozenset(
 )
 
 
+def _import_solver_modules(package_name: str) -> None:
+    """The importer for modules in a Pyomo solver package."""
+    try:
+        solver_package: Any = importlib.import_module(package_name)
+    except (ImportError, AttributeError, NameError):
+        return
+
+    def ignore_module_error(module_name: str) -> None:
+        return None
+
+    solver_modules: tuple[pkgutil.ModuleInfo, ...] = tuple(
+        pkgutil.walk_packages(
+            solver_package.__path__,
+            f"{solver_package.__name__}.",
+            onerror=ignore_module_error,
+        )
+    )
+    for module_info in solver_modules:
+        module_parts: tuple[str, ...] = tuple(module_info.name.split("."))
+        if "tests" in module_parts or module_parts[-1].startswith("test_"):
+            continue
+        try:
+            importlib.import_module(module_info.name)
+        except (ImportError, AttributeError, NameError):
+            continue
+
+
 class PyomoAdapter:
     """The adapter for solve calls made through Pyomo."""
 
@@ -87,26 +114,8 @@ class PyomoAdapter:
                 owner_class: Any | None = getattr(owner_module, class_name, None)
                 if isinstance(owner_class, type):
                     owners.append(owner_class)
-        try:
-            appsi_solver_package: Any = importlib.import_module(
-                "pyomo.contrib.appsi.solvers"
-            )
-        except Exception:
-            appsi_solver_package = None
-        if appsi_solver_package is not None:
-            appsi_solver_modules: tuple[str, ...] = tuple(
-                module_info.name
-                for module_info in pkgutil.iter_modules(
-                    appsi_solver_package.__path__,
-                    f"{appsi_solver_package.__name__}.",
-                )
-                if module_info.name.rsplit(".", 1)[-1] != "tests"
-            )
-            for appsi_solver_module in appsi_solver_modules:
-                try:
-                    importlib.import_module(appsi_solver_module)
-                except (ImportError, AttributeError, NameError):
-                    continue
+        _import_solver_modules("pyomo.contrib.appsi.solvers")
+        _import_solver_modules("pyomo.contrib.solver.solvers")
         specific_owners: list[type[Any]] = []
         optional_modules: tuple[tuple[str, str, str], ...] = (
             ("pyomo.solvers.plugins.solvers.gurobi_direct", "GurobiDirect", "gurobi"),
@@ -435,6 +444,46 @@ class PyomoAdapter:
     ) -> bool | None:
         if not result_sources:
             return None
+        has_feasible_legacy_solution: bool = False
+        has_infeasible_legacy_solution: bool = False
+        # NOTE: A legacy SOL reader can retain an infeasible final iterate.
+        for source in result_sources:
+            solutions: Any | None = self._read(source, "solution")[0]
+            if solutions is None:
+                continue
+            solution_count: int | None = None
+            try:
+                solution_count = len(solutions)
+            except Exception:
+                continue
+            if solution_count is None or solution_count == 0:
+                continue
+            try:
+                for solution in solutions:
+                    solution_status: Any | None = self._read(solution, "status")[0]
+                    solution_status_name: str | None = self._native_name(
+                        solution_status
+                    )
+                    if solution_status_name is None:
+                        continue
+                    normalized_status: str = solution_status_name.rsplit(".", 1)[
+                        -1
+                    ].casefold()
+                    if normalized_status in (
+                        "feasible",
+                        "optimal",
+                        "globallyoptimal",
+                        "locallyoptimal",
+                    ):
+                        has_feasible_legacy_solution = True
+                    elif normalized_status in ("infeasible", "error"):
+                        has_infeasible_legacy_solution = True
+            except Exception:
+                continue
+        if has_feasible_legacy_solution:
+            return True
+        if has_infeasible_legacy_solution:
+            return False
         for source in result_sources:
             explicit_value: Any | None = self._read(source, "has_solution")[0]
             if isinstance(explicit_value, bool):
@@ -480,17 +529,6 @@ class PyomoAdapter:
                 return math.isfinite(incumbent_number)
             if incumbent_reason is MissingReason.UNDEFINED:
                 return False
-        for source in result_sources:
-            solutions: Any | None = self._read(source, "solution")[0]
-            if solutions is None:
-                continue
-            solution_count: int | None = None
-            try:
-                solution_count = len(solutions)
-            except Exception:
-                solution_count = None
-            if solution_count is not None and solution_count > 0:
-                return True
         return None
 
     def _metrics(
@@ -1128,8 +1166,9 @@ class PyomoAdapter:
         bound_arguments: Mapping[str, Any],
     ) -> tuple[SolverParameter, ...]:
         values: dict[str, int | float | str | bool] = {}
-        # NOTE: Gurobi string parameters can contain credentials, hosts, paths, or job labels.
-        include_string_values: bool = self._engine(solver) != "gurobi"
+        # NOTE: Unknown and Gurobi string options can contain credentials or paths.
+        engine: str | None = self._engine(solver)
+        include_string_values: bool = engine is not None and engine != "gurobi"
         options: Any | None = self._read(solver, "options")[0]
         self._add_parameter_mapping(
             values,
@@ -1257,13 +1296,15 @@ class PyomoAdapter:
                     or same_as_config_default
                 ):
                     continue
+            parameter_name: str | None = str(name) if name is not None else None
             if (
                 isinstance(value, (int, float, str, bool))
                 and (include_string_values or not isinstance(value, str))
-                and name is not None
-                and str(name) not in excluded_names
+                and parameter_name is not None
+                and parameter_name not in excluded_names
+                and parameter_name.casefold() != "licenseid"
             ):
-                target[str(name)] = value
+                target[parameter_name] = value
 
     def _engine(self, solver: Any) -> str | None:
         candidates: list[Any] = []

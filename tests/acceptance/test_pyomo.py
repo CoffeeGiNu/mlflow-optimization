@@ -1,11 +1,15 @@
 """Acceptance tests for Pyomo solver observations."""
 
 import math
+import os
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from mlflow.entities import Run
-from mlflow_optimization import autolog
 from pyomo.environ import (
     Binary,
     ConcreteModel,
@@ -17,6 +21,10 @@ from pyomo.environ import (
     maximize,
     minimize,
 )
+from pyomo.opt import SolverResults, TerminationCondition
+from pyomo.opt.results.solution import SolutionStatus
+
+from mlflow_optimization import autolog
 
 
 def _solver_or_skip(solver_name: str) -> Any:
@@ -33,6 +41,32 @@ def _bounded_model(objective_sense: Any) -> Any:
     model.bounds = Constraint(expr=(2, model.value, 5))
     model.objective = Objective(expr=model.value, sense=objective_sense)
     return model
+
+
+def _stub_shell_solver(
+    solver: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    result: SolverResults,
+    error: Exception | None = None,
+) -> None:
+    def available(exception_flag: bool = True) -> bool:
+        return True
+
+    def presolve(*arguments: Any, **keywords: Any) -> None:
+        return None
+
+    def apply_solver() -> Any:
+        if error is not None:
+            raise error
+        return SimpleNamespace(rc=0)
+
+    def postsolve() -> SolverResults:
+        return result
+
+    monkeypatch.setattr(solver, "available", available)
+    monkeypatch.setattr(solver, "_presolve", presolve)
+    monkeypatch.setattr(solver, "_apply_solver", apply_solver)
+    monkeypatch.setattr(solver, "_postsolve", postsolve)
 
 
 def _single_solve_run(tracking: Any) -> Run:
@@ -231,3 +265,192 @@ def test_gurobi_direct_overlap_records_one_pyomo_run(tracking: Any) -> None:
     assert tags["optimization.solver"] == "gurobi"
     assert tags["optimization.termination"] == "optimal"
     assert tags["optimization.has_solution"] == "true"
+
+
+def test_contrib_gurobi_persistent_imported_after_autolog_is_observed(
+    tracking: Any,
+) -> None:
+    repository_root: Path = Path(__file__).resolve().parents[2]
+    environment: dict[str, str] = os.environ.copy()
+    previous_python_path: str = environment.get("PYTHONPATH", "")
+    python_path_entries: list[str] = [str(repository_root / "src")]
+    if previous_python_path:
+        python_path_entries.append(previous_python_path)
+    environment["PYTHONPATH"] = os.pathsep.join(python_path_entries)
+    subprocess_script: str = """
+import sys
+from typing import Any
+
+import mlflow
+
+mlflow.set_tracking_uri(sys.argv[1])
+mlflow.set_experiment("late-pyomo-solver-test")
+from mlflow_optimization import autolog
+
+autolog(solvers=["pyomo"])
+
+from pyomo.contrib.solver.solvers.gurobi.gurobi_persistent import GurobiPersistent
+import pyomo.environ as pyomo
+
+model: Any = pyomo.ConcreteModel()
+model.value = pyomo.Var(domain=pyomo.Binary)
+model.objective = pyomo.Objective(expr=model.value, sense=pyomo.minimize)
+solver: Any = GurobiPersistent()
+solver.solve(model)
+autolog(disable=True)
+"""
+    process: subprocess.CompletedProcess[str] = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            subprocess_script,
+            tracking.client.tracking_uri,
+        ],
+        cwd=repository_root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert process.returncode == 0, process.stdout + process.stderr
+
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 1
+    assert runs[0].data.tags["optimization.api"] == "pyomo"
+
+
+def test_gurobi_direct_solution_limit_records_real_incumbent(tracking: Any) -> None:
+    autolog(solvers=["pyomo"])
+    solver: Any = _solver_or_skip("gurobi_direct")
+    solver.options["SolutionLimit"] = 1
+    solver.options["Presolve"] = 0
+    solver.options["Cuts"] = 0
+    solver.options["OutputFlag"] = 0
+    weights: tuple[int, ...] = tuple(
+        (37 * index * index + 11 * index) % 97 + 23 for index in range(40)
+    )
+    values: tuple[int, ...] = tuple(
+        (53 * index * index + 7 * index) % 89 + 31 for index in range(40)
+    )
+    capacity: int = sum(weights) // 3
+    model: Any = ConcreteModel()
+    model.indices = RangeSet(0, 39)
+    model.variables = Var(model.indices, domain=Binary)
+    model.capacity = Constraint(
+        expr=sum(
+            weights[index] * model.variables[index] for index in model.indices
+        )
+        <= capacity
+    )
+    model.objective = Objective(
+        expr=sum(
+            values[index] * model.variables[index] for index in model.indices
+        ),
+        sense=maximize,
+    )
+
+    result: Any = solver.solve(model, load_solutions=False)
+
+    run: Run = _single_solve_run(tracking)
+    assert str(result.solution[0].status) == "stoppedByLimit"
+    assert run.data.tags["optimization.has_solution"] == "true"
+    assert run.data.metrics["objective_value"] == pytest.approx(1134)
+
+
+def test_shell_gurobi_credentials_are_not_recorded_when_solve_raises(
+    tracking: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    autolog(solvers=["pyomo"])
+    solver: Any = SolverFactory("gurobi")
+    wls_secret: str = "dummy-wls-secret"
+    server_password: str = "dummy-server-password"
+    solver.options["WLSSecret"] = wls_secret
+    solver.options["ServerPassword"] = server_password
+    solver.options["lIcEnSeId"] = 42
+    error: RuntimeError = RuntimeError("forced solver failure")
+    _stub_shell_solver(solver, monkeypatch, SolverResults(), error)
+
+    with pytest.raises(RuntimeError, match="forced solver failure"):
+        solver.solve()
+
+    run: Run = _single_solve_run(tracking)
+    parameters: dict[str, str] = run.data.params
+    tags: dict[str, str] = run.data.tags
+    parameter_names: set[str] = {name.casefold() for name in parameters}
+    credential_names: set[str] = {
+        "solver_param.wlssecret",
+        "solver_param.serverpassword",
+    }
+    secret_values: set[str] = {wls_secret, server_password}
+    assert tags["optimization.solver"] == "unknown"
+    assert tags["optimization.termination"] == "error"
+    assert not credential_names.intersection(parameter_names)
+    assert "solver_param.licenseid" not in parameter_names
+    assert not secret_values.intersection(parameters.values())
+
+
+@pytest.mark.parametrize(
+    (
+        "solution_status",
+        "termination_condition",
+        "expected_has_solution",
+        "expected_termination",
+    ),
+    (
+        (
+            SolutionStatus.infeasible,
+            TerminationCondition.infeasible,
+            "false",
+            "infeasible",
+        ),
+        (
+            SolutionStatus.error,
+            TerminationCondition.error,
+            "false",
+            "error",
+        ),
+        (
+            SolutionStatus.unknown,
+            TerminationCondition.maxIterations,
+            "unknown",
+            "iteration_limit",
+        ),
+        (
+            SolutionStatus.stoppedByLimit,
+            TerminationCondition.maxIterations,
+            "unknown",
+            "iteration_limit",
+        ),
+        (
+            SolutionStatus.feasible,
+            TerminationCondition.maxIterations,
+            "true",
+            "iteration_limit",
+        ),
+    ),
+)
+def test_legacy_solution_entry_status_controls_feasibility(
+    tracking: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    solution_status: Any,
+    termination_condition: Any,
+    expected_has_solution: str,
+    expected_termination: str,
+) -> None:
+    autolog(solvers=["pyomo"])
+    solver: Any = SolverFactory("gurobi")
+    result: SolverResults = SolverResults()
+    solver_information: Any = result.solver.add()
+    solver_information.termination_condition = termination_condition
+    solution: Any = result.solution.add()
+    solution.status = solution_status
+    _stub_shell_solver(solver, monkeypatch, result)
+
+    solver.solve()
+
+    run: Run = _single_solve_run(tracking)
+    tags: dict[str, str] = run.data.tags
+    assert tags["optimization.termination"] == expected_termination
+    assert tags["optimization.has_solution"] == expected_has_solution
