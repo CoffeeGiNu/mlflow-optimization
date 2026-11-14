@@ -7,7 +7,7 @@ from typing import Any
 
 import gurobipy
 
-from mlflow_optimization.common.patching import Patch
+from mlflow_optimization.common.patching import Patch, receiver_of
 from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver, SolverIntegration
 from mlflow_optimization.features.metadata.types import ParameterOrigin, ReportedMetadata, SolverParameter
@@ -46,14 +46,21 @@ class Integration(SolverIntegration):
     def install(self, observer: SolveObserver) -> None:
         def factory(original: Any) -> Callable[..., Any]:
             @wraps(original)
-            def wrapped(*arguments: Any, **keyword_arguments: Any) -> Any:
+            def wrapped(*args: Any, **kwargs: Any) -> Any:
                 def call() -> Any:
-                    return original(*arguments, **keyword_arguments)
+                    return original(*args, **kwargs)
 
                 def extract(result: Any | None, error: BaseException | None) -> SolveObservation:
-                    model: gurobipy.Model | None = _model_from_call(arguments, keyword_arguments)
-                    if model is None:
+                    receiver_error: KeyError
+                    try:
+                        receiver: Any = receiver_of(original, args, kwargs)
+                    except KeyError as receiver_error:
+                        if error is not None:
+                            raise ObservationError("Could not find the Gurobi model for this solve.") from error
+                        raise ObservationError("Could not find the Gurobi model for this solve.") from receiver_error
+                    if not isinstance(receiver, gurobipy.Model):
                         raise ObservationError("Could not find the Gurobi model for this solve.") from error
+                    model: gurobipy.Model = receiver
                     observation_error: AttributeError | gurobipy.GurobiError
                     try:
                         return _extract(model, error)
@@ -145,20 +152,6 @@ def _extract(model: gurobipy.Model, error: BaseException | None) -> SolveObserva
     return SolveObservation(api="gurobipy", outcome=outcome, metrics=metrics, metadata=metadata)
 
 
-def _model_from_call(
-    arguments: tuple[Any, ...],
-    keyword_arguments: dict[str, Any],
-) -> gurobipy.Model | None:
-    model_value: Any
-    if arguments:
-        model_value = arguments[0]
-    else:
-        model_value = keyword_arguments.get("self")
-    if isinstance(model_value, gurobipy.Model):
-        return model_value
-    return None
-
-
 def _read_attribute(model: gurobipy.Model, attribute_name: str) -> tuple[bool, Any]:
     try:
         value: Any = getattr(model, attribute_name)
@@ -241,6 +234,31 @@ def _read_has_objective(model: gurobipy.Model) -> bool | None:
             return True
         if objective_has_content is None:
             objective_unavailable = True
+    piecewise_objective: bool | None = _has_piecewise_linear_objective(model)
+    if piecewise_objective is True:
+        return True
+    if piecewise_objective is None:
+        objective_unavailable = True
+    if objective_unavailable:
+        return None
+    return False
+
+
+def _has_piecewise_linear_objective(model: gurobipy.Model) -> bool | None:
+    try:
+        variables: list[gurobipy.Var] = model.getVars()
+    except (AttributeError, gurobipy.GurobiError):
+        return None
+    objective_unavailable: bool = False
+    variable: gurobipy.Var
+    for variable in variables:
+        try:
+            points: Any = model.getPWLObj(variable)
+        except (AttributeError, gurobipy.GurobiError):
+            objective_unavailable = True
+            continue
+        if points:
+            return True
     if objective_unavailable:
         return None
     return False
