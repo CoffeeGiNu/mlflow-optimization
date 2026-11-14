@@ -155,6 +155,7 @@ class RecordSolve:
 
     def begin(self) -> object:
         """The parent run and annotations in effect at solve start."""
+        _last_solve.set(None)
         parent: RunReference | None
         try:
             parent = self._runs.active_run()
@@ -221,11 +222,11 @@ class RecordSolve:
 
 
 def last_solve() -> SolveRun | None:
-    """The most recent solve recorded in the current thread or async context.
+    """The latest observed solve's run in the current thread or async context.
 
     Returns
     -------
     SolveRun or None
-        None until a solve is recorded in the current context.
+        The recorded run, or None if no solve was observed or its run was not recorded.
     """
     return _last_solve.get()
