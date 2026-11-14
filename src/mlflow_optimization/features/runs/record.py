@@ -135,8 +135,13 @@ class RecordSolve:
         if not isinstance(context, _RecordingContext):
             raise TypeError("Invalid recording context")
         observation: SolveObservation | None = solve.observation
+        has_objective: bool | None = (
+            observation.metrics.has_objective if observation is not None else None
+        )
         outcome: SolveOutcome = classify_outcome(
-            observation.outcome if observation else None, solve.error
+            observation.outcome if observation else None,
+            solve.error,
+            has_objective=has_objective,
         )
         metrics: NormalizedMetrics = normalize_metrics(
             observation.metrics if observation else None,
