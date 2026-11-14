@@ -9,7 +9,7 @@ from datetime import timedelta
 from functools import wraps
 from typing import Any
 
-from mlflow_optimization.common.patching import Patch
+from mlflow_optimization.common.patching import Patch, receiver_of
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
 from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.metadata.types import (
@@ -163,19 +163,26 @@ class Integration:
 
                     @wraps(original)
                     def wrapped(
-                        solver: Any,
                         *solve_arguments: Any,
                         **solve_keywords: Any,
                     ) -> Any:
-                        original_signature.bind(
-                            solver,
-                            *solve_arguments,
-                            **solve_keywords,
+                        bound_arguments: inspect.BoundArguments = (
+                            original_signature.bind(
+                                *solve_arguments,
+                                **solve_keywords,
+                            )
                         )
-                        model: Any | None = (
-                            solve_arguments[0]
-                            if solve_arguments
-                            else solve_keywords.get("model")
+                        solver: Any = receiver_of(
+                            original,
+                            solve_arguments,
+                            solve_keywords,
+                        )
+                        model: Any | None = bound_arguments.arguments.get(
+                            "model",
+                            solve_keywords.get("model"),
+                        )
+                        solver_time_before: float | None = self._solver_time_snapshot(
+                            solver
                         )
 
                         def extract(
@@ -188,12 +195,12 @@ class Integration:
                                 result,
                                 error,
                                 solve_keywords,
+                                solver_time_before,
                             )
 
                         return observer.observe(
                             self.api,
                             lambda: original(
-                                solver,
                                 *solve_arguments,
                                 **solve_keywords,
                             ),
@@ -233,6 +240,7 @@ class Integration:
         result: Any | None,
         error: BaseException | None,
         solve_keywords: Mapping[str, Any],
+        solver_time_before: float | None = None,
     ) -> SolveObservation:
         try:
             outcome: ReportedOutcome = self._outcome(solver, result, error)
@@ -242,6 +250,7 @@ class Integration:
                 model,
                 error,
                 outcome,
+                solver_time_before,
             )
             metadata: ReportedMetadata = self._metadata(
                 solver, model, result, solve_keywords
@@ -441,6 +450,7 @@ class Integration:
         model: Any | None,
         error: BaseException | None,
         outcome: ReportedOutcome,
+        solver_time_before: float | None,
     ) -> ReportedMetrics:
         size: dict[str, int] = self._model_size(model)
         objectives: tuple[Any, ...] | None = self._model_objects(model, "Objective")
@@ -480,6 +490,8 @@ class Integration:
         solver_time_seconds: float | MissingReason = self._solver_time(
             result_sources,
             native_solver,
+            self._engine(solver),
+            solver_time_before,
         )
         solver_information: Any | None = self._solver_information(native_solver)
         statistics: dict[str, float | MissingReason] = self._statistics(
@@ -714,18 +726,76 @@ class Integration:
             return MissingReason.UNSUPPORTED
         return number if number is not None else MissingReason.UNSUPPORTED
 
+    def _solver_time_snapshot(self, solver: Any) -> float | None:
+        engine: str | None = self._engine(solver)
+        native_solver: Any | None = self._read(solver, "_solver_model")[0]
+        previous_result: Any | None = self._read(solver, "_last_results_object")[0]
+        native_solver_time: float | None = self._method_number(
+            native_solver,
+            "getRunTime",
+        )
+        if native_solver_time is not None:
+            return native_solver_time
+        if previous_result is None and native_solver is None and engine == "highs":
+            # NOTE: No engine instance or cached result means this solver has no prior HiGHS run.
+            return 0.0
+        if engine != "highs":
+            return None
+        previous_timing_information: Any | None = self._read(
+            previous_result,
+            "timing_info",
+        )[0]
+        previous_timing_value: Any | None = self._read(
+            previous_timing_information,
+            "highs_time",
+        )[0]
+        if isinstance(previous_timing_value, timedelta):
+            return float(previous_timing_value.total_seconds())
+        previous_solver_time: float | None = self._number(previous_timing_value)
+        return previous_solver_time
+
     def _solver_time(
         self,
         result_sources: Sequence[Any],
         native_solver: Any | None,
+        engine: str | None,
+        solver_time_before: float | None,
     ) -> float | MissingReason:
-        for method_name in ("getSolvingTime", "getRunTime"):
-            solving_time: float | None = self._method_number(
+        if engine == "highs":
+            if solver_time_before is None:
+                return MissingReason.UNSUPPORTED
+            cumulative_solver_time: float | None = self._method_number(
                 native_solver,
-                method_name,
+                "getRunTime",
             )
-            if solving_time is not None:
-                return solving_time
+            if cumulative_solver_time is None:
+                for result_source in result_sources:
+                    timing_information: Any | None = self._read(
+                        result_source,
+                        "timing_info",
+                    )[0]
+                    timing_value: Any | None = self._read(
+                        timing_information,
+                        "highs_time",
+                    )[0]
+                    if isinstance(timing_value, timedelta):
+                        cumulative_solver_time = float(timing_value.total_seconds())
+                    else:
+                        cumulative_solver_time = self._number(timing_value)
+                    if cumulative_solver_time is not None:
+                        break
+            if (
+                cumulative_solver_time is None
+                or cumulative_solver_time < solver_time_before
+            ):
+                return MissingReason.UNSUPPORTED
+            return cumulative_solver_time - solver_time_before
+        solving_time: float | None = self._method_number(
+            native_solver,
+            "getSolvingTime",
+        )
+        if solving_time is not None:
+            return solving_time
         native_runtime: float | None = self._number(
             self._read(native_solver, "Runtime")[0]
         )
@@ -737,7 +807,6 @@ class Integration:
                 "timing_info",
             )[0]
             for owner, name in (
-                (timing_information, "highs_time"),
                 (timing_information, "gurobi_time"),
                 (timing_information, "scip_time"),
             ):
