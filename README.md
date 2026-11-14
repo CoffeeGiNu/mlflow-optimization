@@ -12,8 +12,7 @@ Log to a tracking server (`MLFLOW_TRACKING_URI`):
 pip install mlflow-optimization
 ```
 
-> **NOTE**
->
+> [!NOTE]
 > `mlflow-optimization` installs `mlflow-skinny`, which lacks MLflow's default local store. To log without a tracking server, install `mlflow` as well:
 >
 > ```bash
