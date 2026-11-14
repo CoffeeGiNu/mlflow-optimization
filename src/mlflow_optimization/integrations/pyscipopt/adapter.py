@@ -12,7 +12,7 @@ from typing import Any
 import pyscipopt
 import pyscipopt.scip
 from mlflow_optimization.features.autolog.models import SolveObservation
-from mlflow_optimization.features.autolog.ports import SolveObserver
+from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
 from mlflow_optimization.features.metadata.models import (
     ParameterOrigin,
     ReportedMetadata,
@@ -24,6 +24,25 @@ from mlflow_optimization.features.metrics.models import (
     ReportedMetrics,
 )
 from mlflow_optimization.features.outcomes.models import ReportedOutcome, Termination
+
+_PYSCIPOPT_READ_ERRORS: tuple[type[Exception], ...] = (
+    AttributeError,
+    MemoryError,
+    OverflowError,
+    RuntimeError,
+    TypeError,
+    ValueError,
+    Warning,
+)
+_OBJECTIVE_VALUE_ERRORS: tuple[type[Exception], ...] = (
+    *_PYSCIPOPT_READ_ERRORS,
+    AssertionError,
+)
+_OBSERVATION_BUILD_ERRORS: tuple[type[Exception], ...] = (
+    *_OBJECTIVE_VALUE_ERRORS,
+    LookupError,
+    OSError,
+)
 
 _STATUS_TERMINATIONS: dict[str, Termination] = {
     "unknown": Termination.UNKNOWN,
@@ -81,7 +100,13 @@ class Integration:
                 def extract(
                     result: Any | None, error: BaseException | None
                 ) -> SolveObservation:
-                    return _extract_observation(model, result, error)
+                    extraction_error: Exception
+                    try:
+                        return _extract_observation(model, result, error)
+                    except _OBSERVATION_BUILD_ERRORS as extraction_error:
+                        raise ObservationError(
+                            "Could not build a PySCIPOpt solve observation."
+                        ) from extraction_error
 
                 return integration._observer.observe(integration.api, call, extract)
 
@@ -93,21 +118,16 @@ class Integration:
         attribute_value: Any
         module_values: dict[str, Any]
 
-        try:
-            for loaded_module_value in tuple(sys.modules.values()):
-                if not isinstance(loaded_module_value, ModuleType):
+        for loaded_module_value in tuple(sys.modules.values()):
+            if not isinstance(loaded_module_value, ModuleType):
+                continue
+            loaded_module = loaded_module_value
+            module_values = vars(loaded_module)
+            for attribute_name, attribute_value in tuple(module_values.items()):
+                if attribute_value is not original_model:
                     continue
-                loaded_module = loaded_module_value
-                module_values = vars(loaded_module)
-                for attribute_name, attribute_value in tuple(module_values.items()):
-                    if attribute_value is not original_model:
-                        continue
-                    module_values[attribute_name] = logging_model
-                    rebound_names.append((loaded_module, attribute_name))
-        except BaseException:
-            for loaded_module, attribute_name in reversed(rebound_names):
-                vars(loaded_module)[attribute_name] = original_model
-            raise
+                module_values[attribute_name] = logging_model
+                rebound_names.append((loaded_module, attribute_name))
 
         self._observer = observer
         self._original_model = original_model
@@ -188,7 +208,9 @@ def _extract_observation(
         if has_solution is False:
             objective_value = MissingReason.NO_SOLUTION
         else:
-            objective_value = _read_number(lambda: float(model.getObjVal()))
+            objective_value = _read_number(
+                lambda: float(model.getObjVal()), _OBJECTIVE_VALUE_ERRORS
+            )
 
     solver_time_seconds: float | MissingReason = _read_number(
         lambda: float(model.getSolvingTime())
@@ -332,7 +354,7 @@ def _read_parameters(model: Any) -> tuple[SolverParameter, ...]:
             parameter_lines: list[str] = parameter_path.read_text(
                 encoding="utf-8"
             ).splitlines()
-    except Exception:
+    except (MemoryError, OSError, ValueError):
         return ()
 
     parameters: list[SolverParameter] = []
@@ -399,9 +421,14 @@ def _add_native_number(
     native[name] = value
 
 
-def _read_number(reader: Callable[[], float]) -> float | MissingReason:
+def _read_number(
+    reader: Callable[[], float],
+    read_errors: tuple[type[Exception], ...] = _PYSCIPOPT_READ_ERRORS,
+) -> float | MissingReason:
     """A SCIP numeric value with its infinity sentinels normalized."""
-    value: float | MissingReason = _read_value(reader, MissingReason.FAILED)
+    value: float | MissingReason = _read_value(
+        reader, MissingReason.FAILED, read_errors
+    )
     if isinstance(value, MissingReason):
         return value
     if value >= 1e20:
@@ -411,9 +438,13 @@ def _read_number(reader: Callable[[], float]) -> float | MissingReason:
     return value
 
 
-def _read_value[Value](reader: Callable[[], Value], unavailable: Value) -> Value:
+def _read_value[Value](
+    reader: Callable[[], Value],
+    unavailable: Value,
+    read_errors: tuple[type[Exception], ...] = _PYSCIPOPT_READ_ERRORS,
+) -> Value:
     """A solver value read without interrupting the remaining extraction."""
     try:
         return reader()
-    except Exception:
+    except read_errors:
         return unavailable
