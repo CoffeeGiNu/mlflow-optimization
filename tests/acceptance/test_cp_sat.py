@@ -1,6 +1,6 @@
+import math
 from typing import Any
 
-import pytest
 from mlflow.entities import Run
 from ortools.sat.python import cp_model
 
@@ -90,52 +90,62 @@ def test_cp_sat_records_an_infeasible_optimization(tracking: Any) -> None:
     assert tags["optimization.missing.relative_gap"] == "no_solution"
 
 
-def test_cp_sat_records_a_deterministic_time_limit(tracking: Any) -> None:
+def test_cp_sat_deterministic_limit_keeps_zero_incumbent(tracking: Any) -> None:
     autolog(solvers=["cp_sat"])
     model: cp_model.CpModel = cp_model.CpModel()
     variables: list[cp_model.IntVar] = [
-        model.new_bool_var(f"item_{index}") for index in range(30)
+        model.new_bool_var(f"item_{index}") for index in range(60)
     ]
-    weights: list[int] = [index * 7 % 19 + 1 for index in range(30)]
-    profits: list[int] = [index * 11 % 23 + 1 for index in range(30)]
-    capacity_terms: list[cp_model.LinearExpr] = []
-    objective_terms: list[cp_model.LinearExpr] = []
-    index: int
-    for index in range(len(variables)):
-        variable: cp_model.IntVar = variables[index]
-        capacity_terms.append(weights[index] * variable)
-        objective_terms.append(profits[index] * variable)
-    model.add(sum(capacity_terms) <= 100)
-    model.maximize(sum(objective_terms))
+    for constraint_index in range(5):
+        model.add(
+            sum(
+                ((index * 17 + constraint_index * 13) % 31 + 1) * variables[index]
+                for index in range(60)
+            )
+            <= 180
+        )
+    model.maximize(sum((index * 11 % 37 + 1) * variables[index] for index in range(60)))
+    for variable in variables:
+        model.add_hint(variable, 0)
     solver: cp_model.CpSolver = cp_model.CpSolver()
-    solver.parameters.max_deterministic_time = 1e-12
+    solver.parameters.max_deterministic_time = 0.0001
     solver.parameters.num_search_workers = 1
     solver.parameters.cp_model_presolve = False
     status: cp_model.CpSolverStatus = solver.solve(model)
-    if status == cp_model.OPTIMAL:
-        pytest.skip(
-            "CP-SAT proved the optimum before exhausting the deterministic-time budget."
-        )
-    assert status in (cp_model.UNKNOWN, cp_model.FEASIBLE)
+    assert status == cp_model.FEASIBLE
 
     runs: list[Run] = tracking.solve_runs()
     assert len(runs) == 1
     run: Run = runs[0]
     tags: dict[str, str] = run.data.tags
     metrics: dict[str, float] = run.data.metrics
-    expected_has_solution: str = (
-        "true" if status == cp_model.FEASIBLE else "false"
-    )
-    expected_termination: str = (
-        "feasible" if status == cp_model.FEASIBLE else "unknown"
-    )
     assert tags["optimization.api"] == "cp_sat"
     assert tags["optimization.solver"] == "cp_sat"
-    assert tags["optimization.termination"] == expected_termination
-    assert tags["optimization.has_solution"] == expected_has_solution
-    if expected_has_solution == "false":
-        assert "objective_value" not in metrics
-        assert tags["optimization.missing.objective_value"] == "no_solution"
+    assert tags["optimization.termination"] == "feasible"
+    assert tags["optimization.raw_status"].startswith("FEASIBLE")
+    assert tags["optimization.has_solution"] == "true"
+    assert metrics["objective_value"] == 0 == solver.objective_value
+    assert math.isfinite(metrics["dual_bound"])
+    assert metrics["dual_bound"] == solver.best_objective_bound > 0
+    assert metrics["absolute_gap"] == metrics["dual_bound"]
+
+
+def test_cp_sat_zero_time_limit_has_no_solution(tracking: Any) -> None:
+    autolog(solvers=["cp_sat"])
+    model: cp_model.CpModel = cp_model.CpModel()
+    value: cp_model.IntVar = model.new_int_var(-10, -5, "value")
+    model.minimize(value)
+    solver: cp_model.CpSolver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 0
+
+    status: cp_model.CpSolverStatus = solver.solve(model)
+
+    assert status == cp_model.UNKNOWN
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 1
+    assert runs[0].data.tags["optimization.has_solution"] == "false"
+    assert runs[0].data.tags["optimization.missing.objective_value"] == "no_solution"
+    assert "objective_value" not in runs[0].data.metrics
 
 
 def test_cp_sat_records_objective_less_sat_and_unsat_models(
@@ -146,8 +156,6 @@ def test_cp_sat_records_objective_less_sat_and_unsat_models(
         (True, "feasible", "true"),
         (False, "infeasible", "false"),
     )
-    case_index: int
-    case: tuple[bool, str, str]
     satisfiable: bool
     expected_termination: str
     expected_has_solution: str
@@ -164,8 +172,6 @@ def test_cp_sat_records_objective_less_sat_and_unsat_models(
     runs: list[Run] = tracking.solve_runs()
     assert len(runs) == len(cases)
     assert runs[0].info.run_id != runs[1].info.run_id
-    run_index: int
-    run: Run
     for run_index, run in enumerate(runs):
         expected_termination = cases[run_index][1]
         expected_has_solution = cases[run_index][2]
@@ -181,7 +187,6 @@ def test_cp_sat_records_objective_less_sat_and_unsat_models(
         assert "absolute_gap" not in metrics
         assert "relative_gap" not in metrics
         assert "wall_time_seconds" in metrics
-        metric_name: str
         for metric_name in (
             "objective_value",
             "dual_bound",
