@@ -16,8 +16,8 @@ from ortools.math_opt.python.result import SolveResult
 from ortools.math_opt.python.solve import StatusNotOk
 
 from mlflow_optimization.common.patching import Patch
-from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
+from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.metadata.types import (
     ParameterOrigin,
     ReportedMetadata,
@@ -156,6 +156,7 @@ class Integration:
                 result,
                 model,
                 solver_type,
+                solve_parameters,
                 outcome.has_solution,
             )
             metadata: ReportedMetadata = self._metadata(
@@ -310,6 +311,7 @@ class Integration:
         result: SolveResult | None,
         model: Model | None,
         solver_type: SolverType | None,
+        solve_parameters: SolveParameters | None,
         has_solution: bool | None,
     ) -> ReportedMetrics:
         """The objective, bound, time, and statistics of a MathOpt result."""
@@ -323,7 +325,12 @@ class Integration:
             objective_value = self._objective_value(result, has_solution)
             dual_bound = self._numeric_result_value(result, "dual_bound")
             solver_time_seconds = self._solver_time(result)
-        statistics: dict[str, float | MissingReason] = self._statistics(result)
+        statistics: dict[str, float | MissingReason] = self._statistics(
+            result,
+            model,
+            solver_type,
+            solve_parameters,
+        )
         native: dict[str, float] = self._native_statistics(result, solver_type)
         return ReportedMetrics(
             has_objective=has_objective,
@@ -419,7 +426,13 @@ class Integration:
             return duration.total_seconds()
         return MissingReason.FAILED
 
-    def _statistics(self, result: SolveResult | None) -> dict[str, float | MissingReason]:
+    def _statistics(
+        self,
+        result: SolveResult | None,
+        model: Model | None,
+        solver_type: SolverType | None,
+        solve_parameters: SolveParameters | None,
+    ) -> dict[str, float | MissingReason]:
         """The common search statistics reported by MathOpt."""
         statistics: dict[str, float | MissingReason] = {
             "node_count": MissingReason.UNSUPPORTED,
@@ -428,15 +441,124 @@ class Integration:
         }
         if result is None:
             return statistics
+        supported_statistics: set[str] = set()
+        if solver_type is SolverType.GLOP:
+            supported_statistics.add("simplex_iterations")
+        elif solver_type is SolverType.GSCIP:
+            supported_statistics.add("node_count")
+            if self._gscip_iteration_statistics_available(result):
+                supported_statistics.update(
+                    ("simplex_iterations", "barrier_iterations")
+                )
+        elif solver_type is SolverType.HIGHS:
+            has_integer_variables: bool | None = self._has_integer_variables(model)
+            solves_relaxation: bool | None = self._highs_solves_relaxation(
+                solve_parameters
+            )
+            if solves_relaxation is True or (
+                solves_relaxation is False and has_integer_variables is False
+            ):
+                supported_statistics.update(
+                    ("simplex_iterations", "barrier_iterations")
+                )
+            elif solves_relaxation is False and has_integer_variables is True:
+                supported_statistics.add("node_count")
         solve_stats: object = self._guarded_attribute(result, "solve_stats")
         statistic_name: str
         for statistic_name in statistics:
+            if statistic_name not in supported_statistics:
+                continue
             value: object = self._guarded_attribute(solve_stats, statistic_name)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 statistics[statistic_name] = float(value)
             elif value is _UNAVAILABLE:
                 statistics[statistic_name] = MissingReason.FAILED
         return statistics
+
+    def _gscip_iteration_statistics_available(self, result: SolveResult) -> bool:
+        """Whether GSCIP reports post-presolve iteration statistics."""
+        termination: object = self._guarded_attribute(result, "termination")
+        limit: object = self._guarded_attribute(termination, "limit")
+        if limit is _UNAVAILABLE:
+            return False
+        output: object = self._guarded_attribute(result, "gscip_specific_output")
+        solve_stats: object = self._guarded_attribute(output, "stats")
+        list_fields_method: object = self._guarded_attribute(solve_stats, "ListFields")
+        if not callable(list_fields_method):
+            return False
+        try:
+            fields: object = list_fields_method()
+        except (AttributeError, RuntimeError):
+            return False
+        if not isinstance(fields, list):
+            return False
+        statistic_names: frozenset[str] = frozenset(
+            (
+                "node_count",
+                "total_lp_iterations",
+                "primal_simplex_iterations",
+                "dual_simplex_iterations",
+                "barrier_iterations",
+                "deterministic_time",
+            )
+        )
+        field_descriptor: object
+        field_value: object
+        for field_descriptor, field_value in cast(
+            list[tuple[object, object]], fields
+        ):
+            field_name: object = self._guarded_attribute(field_descriptor, "name")
+            if (
+                isinstance(field_name, str)
+                and field_name in statistic_names
+                and isinstance(field_value, (int, float))
+                and not isinstance(field_value, bool)
+                and field_value != 0
+            ):
+                return True
+        return limit is None
+
+    def _has_integer_variables(self, model: Model | None) -> bool | None:
+        """Whether a MathOpt model contains integer variables."""
+        if model is None:
+            return None
+        variables_method: object = self._guarded_attribute(model, "variables")
+        if not callable(variables_method):
+            return None
+        try:
+            variables: tuple[object, ...] = tuple(variables_method())
+        except (AttributeError, RuntimeError, StatusNotOk, TypeError):
+            return None
+        variable: object
+        for variable in variables:
+            integer_flag: object = self._guarded_attribute(variable, "integer")
+            if not isinstance(integer_flag, bool):
+                return None
+            if integer_flag:
+                return True
+        return False
+
+    def _highs_solves_relaxation(
+        self, solve_parameters: SolveParameters | None
+    ) -> bool | None:
+        """Whether HiGHS is configured to solve the relaxation of a MIP."""
+        if solve_parameters is None:
+            return False
+        highs_parameters: object = self._guarded_attribute(
+            solve_parameters,
+            "highs",
+        )
+        boolean_options: object = self._guarded_attribute(
+            highs_parameters,
+            "bool_options",
+        )
+        if not isinstance(boolean_options, Mapping):
+            return None
+        try:
+            solves_relaxation: object = boolean_options.get("solve_relaxation", False)
+        except (KeyError, TypeError):
+            return None
+        return solves_relaxation if isinstance(solves_relaxation, bool) else None
 
     def _native_statistics(
         self,
