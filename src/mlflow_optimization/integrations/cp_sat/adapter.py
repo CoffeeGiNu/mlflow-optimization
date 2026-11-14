@@ -11,7 +11,10 @@ from ortools.sat.python import cp_model
 
 from mlflow_optimization.common.patching import Patch
 from mlflow_optimization.features.autolog.models import SolveObservation
-from mlflow_optimization.features.autolog.ports import SolveObserver
+from mlflow_optimization.features.autolog.ports import (
+    ObservationError,
+    SolveObserver,
+)
 from mlflow_optimization.features.metadata.models import (
     ParameterOrigin,
     ReportedMetadata,
@@ -95,15 +98,34 @@ class Integration:
         result: Any | None,
         error: BaseException | None,
     ) -> SolveObservation:
-        outcome: ReportedOutcome = self._read_outcome(solver, model, result, error)
-        metrics: ReportedMetrics = self._read_metrics(
-            solver,
-            model,
-            outcome,
-            error is not None,
+        extraction_error: (
+            AttributeError | RuntimeError | TypeError | ValueError | OverflowError
         )
-        metadata: ReportedMetadata = self._read_metadata(solver, model)
-        return SolveObservation(self.api, outcome, metrics, metadata)
+        try:
+            outcome: ReportedOutcome = self._read_outcome(
+                solver,
+                model,
+                result,
+                error,
+            )
+            metrics: ReportedMetrics = self._read_metrics(
+                solver,
+                model,
+                outcome,
+                error is not None,
+            )
+            metadata: ReportedMetadata = self._read_metadata(solver, model)
+            return SolveObservation(self.api, outcome, metrics, metadata)
+        except (
+            AttributeError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            OverflowError,
+        ) as extraction_error:
+            raise ObservationError(
+                "Could not build a CP-SAT solve observation."
+            ) from extraction_error
 
     def _read_outcome(
         self,
@@ -151,15 +173,14 @@ class Integration:
             cp_model.UNKNOWN: "UNKNOWN",
         }
         status_name: str = status_names.get(result, "unknown")
-        error: Exception
         if status_name == "unknown":
             try:
                 status_name = str(result.name)
-            except Exception:
+            except (AttributeError, RuntimeError):
                 status_name = "unknown"
         try:
             status_code: int = int(result)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return status_name
         if status_name == "unknown":
             return f"unknown ({status_code})"
@@ -172,14 +193,13 @@ class Integration:
     ) -> bool | None:
         if model is None:
             return None
-        error: Exception
         try:
             variable_count: int = len(model.proto.variables)
-        except Exception:
+        except (AttributeError, RuntimeError, TypeError):
             return None
         try:
             solution_count: int = len(solver.response_proto.solution)
-        except Exception:
+        except (AttributeError, RuntimeError, TypeError):
             return None
         if variable_count == 0:
             return None
@@ -227,21 +247,21 @@ class Integration:
             return None
         try:
             model_proto: Any = model.proto
-        except Exception:
+        except (AttributeError, RuntimeError):
             return None
         has_floating_point_objective: bool | None = None
         try:
             has_floating_point_objective = bool(
                 model_proto.has_floating_point_objective()
             )
-        except Exception:
+        except (AttributeError, RuntimeError, TypeError):
             pass
         if has_floating_point_objective is True:
             return True
         has_integer_objective: bool | None = None
         try:
             has_integer_objective = bool(model_proto.has_objective())
-        except Exception:
+        except (AttributeError, RuntimeError, TypeError):
             pass
         if has_integer_objective is True:
             return True
@@ -258,28 +278,28 @@ class Integration:
             return None
         try:
             model_proto: Any = model.proto
-        except Exception:
+        except (AttributeError, RuntimeError, TypeError, ValueError, OverflowError):
             return None
         has_floating_point_objective: bool | None = None
         try:
             has_floating_point_objective = bool(
                 model_proto.has_floating_point_objective()
             )
-        except Exception:
+        except (AttributeError, RuntimeError, TypeError):
             pass
         if has_floating_point_objective is True:
             try:
                 maximize: bool = bool(
                     model_proto.floating_point_objective.maximize
                 )
-            except Exception:
+            except (AttributeError, RuntimeError, TypeError):
                 return None
             return ObjectiveSense.MAXIMIZE if maximize else ObjectiveSense.MINIMIZE
         if has_floating_point_objective is not False:
             return None
         try:
-            scaling_factor: float = float(model.proto.objective.scaling_factor)
-        except Exception:
+            scaling_factor: float = float(model_proto.objective.scaling_factor)
+        except (AttributeError, RuntimeError, TypeError, ValueError, OverflowError):
             return None
         if scaling_factor < 0:
             return ObjectiveSense.MAXIMIZE
@@ -315,11 +335,10 @@ class Integration:
         solver: Any,
         name: str,
     ) -> float | MissingReason:
-        error: Exception
         try:
             response: Any = solver.response_proto
             value: float = float(getattr(response, name))
-        except Exception:
+        except (AttributeError, RuntimeError, TypeError, ValueError, OverflowError):
             return MissingReason.FAILED
         if value >= 2**63 - 1:
             return math.inf
@@ -348,7 +367,7 @@ class Integration:
             try:
                 response: Any = solver.response_proto
                 value: float = float(getattr(response, name))
-            except Exception:
+            except (AttributeError, RuntimeError, TypeError, ValueError, OverflowError):
                 continue
             native[name] = value
         return native
@@ -370,21 +389,20 @@ class Integration:
             return {}
         try:
             model_proto: Any = model.proto
-        except Exception:
+        except (AttributeError, RuntimeError):
             return {}
         problem: dict[str, int] = {}
         variables: Any | None = None
-        error: Exception
         try:
             variables = model_proto.variables
             variable_count: int = len(variables)
             problem["num_variables"] = variable_count
             problem["num_integer_variables"] = variable_count
-        except Exception:
-            variables = ()
+        except (AttributeError, RuntimeError, TypeError):
+            variables = None
         try:
             problem["num_constraints"] = len(model_proto.constraints)
-        except Exception:
+        except (AttributeError, RuntimeError, TypeError):
             pass
         if variables is not None:
             boolean_variable_count: int = 0
@@ -395,7 +413,7 @@ class Integration:
                     domain: list[int] = list(variable.domain)
                     if domain == [0, 1]:
                         boolean_variable_count += 1
-                except Exception:
+                except (AttributeError, RuntimeError, TypeError, ValueError):
                     boolean_variable_count_known = False
             if boolean_variable_count_known:
                 problem["num_boolean_variables"] = boolean_variable_count
@@ -405,7 +423,7 @@ class Integration:
         try:
             configured_parameters: Any = solver.parameters
             default_parameters: Any = sat_parameters_pb2.SatParameters()
-        except Exception:
+        except (AttributeError, RuntimeError):
             return ()
         parameters: list[SolverParameter] = []
         field: Any
@@ -418,11 +436,20 @@ class Integration:
                     default_value = list(default_value)
                 if configured_value == default_value:
                     continue
-                value: int | float | str | bool = self._parameter_value(configured_value, field)
+                value: int | float | str | bool = self._parameter_value(
+                    configured_value,
+                    field,
+                )
                 parameters.append(
                     SolverParameter(field.name, value, ParameterOrigin.EXPLICIT)
                 )
-            except Exception:
+            except (
+                AttributeError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+                OverflowError,
+            ):
                 continue
         return tuple(parameters)
 
