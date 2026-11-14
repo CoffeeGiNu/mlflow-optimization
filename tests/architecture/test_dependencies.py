@@ -223,7 +223,7 @@ def _check_integration_import(
             return None
         if target_feature is not None:
             return f"{relative_path}: MLflow integration imports disallowed feature '{target_feature}'"
-        if module_root in {"mlflow", "requests"}:
+        if module_root == "mlflow":
             return None
         return f"{relative_path}: MLflow integration imports unsupported module '{target_module}'"
     if source_integration not in INTEGRATION_SDK_PREFIXES:
