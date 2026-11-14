@@ -7,7 +7,7 @@ from typing import Any
 import ortools
 from ortools.constraint_solver import pywrapcp
 
-from mlflow_optimization.common.patching import Patch
+from mlflow_optimization.common.patching import Patch, receiver_of
 from mlflow_optimization.features.autolog.ports import (
     ObservationError,
     SolveObserver,
@@ -174,19 +174,18 @@ class Integration(SolverIntegration):
 
         def factory(original: Any) -> Any:
             @wraps(original)
-            def wrapped(
-                routing_model: pywrapcp.RoutingModel,
-                *arguments: Any,
-                **keyword_arguments: Any,
-            ) -> Any:
+            def wrapped(*args: Any, **kwargs: Any) -> Any:
+                routing_model: pywrapcp.RoutingModel = receiver_of(
+                    original, args, kwargs
+                )
                 search_parameters: Any | None = self._search_parameters(
                     entry_point,
-                    arguments,
-                    keyword_arguments,
+                    args,
+                    kwargs,
                 )
 
                 def call() -> Any:
-                    return original(routing_model, *arguments, **keyword_arguments)
+                    return original(*args, **kwargs)
 
                 def extract(
                     result: Any | None,
