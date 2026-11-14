@@ -1,6 +1,5 @@
 """Observation support for OR-Tools CP-SAT."""
 
-import math
 from collections.abc import Callable
 from functools import wraps
 from typing import Any
@@ -10,11 +9,11 @@ from ortools.sat import sat_parameters_pb2
 from ortools.sat.python import cp_model
 
 from mlflow_optimization.common.patching import Patch
-from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.autolog.ports import (
     ObservationError,
     SolveObserver,
 )
+from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.metadata.types import (
     ParameterOrigin,
     ReportedMetadata,
@@ -323,7 +322,7 @@ class Integration:
         solver: Any,
         outcome: ReportedOutcome,
     ) -> float | MissingReason:
-        if outcome.termination in (Termination.INFEASIBLE, Termination.ERROR):
+        if outcome.has_solution is not True:
             return MissingReason.UNDEFINED
         return self._read_response_metric(solver, "best_objective_bound")
 
@@ -340,10 +339,6 @@ class Integration:
             value: float = float(getattr(response, name))
         except (AttributeError, RuntimeError, TypeError, ValueError, OverflowError):
             return MissingReason.FAILED
-        if value >= 2**63 - 1:
-            return math.inf
-        if value <= -(2**63):
-            return -math.inf
         return value
 
     def _read_native_metrics(self, solver: Any) -> dict[str, float]:
@@ -364,12 +359,12 @@ class Integration:
         native: dict[str, float] = {}
         name: str
         for name in native_fields:
-            try:
-                response: Any = solver.response_proto
-                value: float = float(getattr(response, name))
-            except (AttributeError, RuntimeError, TypeError, ValueError, OverflowError):
-                continue
-            native[name] = value
+            metric_value: float | MissingReason = self._read_response_metric(
+                solver,
+                name,
+            )
+            if not isinstance(metric_value, MissingReason):
+                native[name] = metric_value
         return native
 
     def _read_metadata(self, solver: Any, model: Any | None) -> ReportedMetadata:
