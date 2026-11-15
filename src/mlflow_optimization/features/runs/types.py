@@ -4,6 +4,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
+from mlflow_optimization.features.progress.types import HistoryPoint as _HistoryPoint
+
+HistoryPoint = _HistoryPoint
+
 
 @dataclass(frozen=True)
 class RunReference:
@@ -11,6 +15,7 @@ class RunReference:
 
     run_id: str
     experiment_id: str
+    tracking_uri: str | None = None
 
 
 class RunStatus(StrEnum):
@@ -41,3 +46,4 @@ class RecordOptions:
     log_solver_parameters: bool = True
     log_solver_metrics: bool = True
     log_artifacts: bool = True
+    log_progress: bool = True

@@ -90,6 +90,31 @@ def test_optimal_mixed_integer_problem_is_recorded(tracking: Tracking) -> None:
     assert "dual_bound" in run.data.metrics
 
 
+@pytest.mark.parametrize("solver_type", (SolverType.GSCIP, SolverType.CP_SAT))
+def test_integer_feasibility_problem_has_no_objective_history(
+    tracking: Tracking,
+    solver_type: SolverType,
+) -> None:
+    model: Model = Model()
+    variable: Variable = model.add_binary_variable()
+    model.add_linear_constraint(variable >= 1.0)
+    autolog(libraries=["mathopt"])
+
+    _solve(model, solver_type)
+
+    run: Run = _single_solve_run(tracking)
+    assert run.data.tags["optimization.has_objective"] == "false"
+    for metric_name in (
+        "objective_value",
+        "dual_bound",
+        "absolute_gap",
+        "relative_gap",
+    ):
+        assert metric_name not in run.data.metrics
+        assert tracking.client.get_metric_history(run.info.run_id, metric_name) == []
+        assert run.data.tags[f"optimization.missing.{metric_name}"] == "undefined"
+
+
 def test_infeasible_problem_records_no_objective_value(tracking: Tracking) -> None:
     autolog(libraries=["mathopt"])
     _solve(_make_infeasible_model(), SolverType.GLOP)

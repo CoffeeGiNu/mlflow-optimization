@@ -1,6 +1,6 @@
 """Recording of completed solves and later additions to them."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 
@@ -27,17 +27,31 @@ from mlflow_optimization.features.outcomes.classify import (
     outcome_tags,
 )
 from mlflow_optimization.features.outcomes.types import SolveOutcome
+from mlflow_optimization.features.progress.recorder import ProgressRecorder
+from mlflow_optimization.features.progress.types import HistoryPoint, SampleSink
 
 from .ports import RunStore, RunStoreError
 from .types import RecordOptions, RunReference, RunStatus, SolveRecord
 
 
-@dataclass(frozen=True)
+def _identity_tags(api: str, solve_id: str, solve_index: int) -> dict[str, str]:
+    """The identity tags of a solve."""
+    return {
+        "optimization.solve_id": solve_id,
+        "optimization.solve_index": str(solve_index),
+        "optimization.api": api,
+    }
+
+
+@dataclass
 class _RecordingContext:
     """The state captured at solve start."""
 
     parent: RunReference | None
     annotation: Annotation
+    log_progress: bool
+    run: RunReference | None = None
+    recorder: ProgressRecorder | None = None
 
 
 class SolveRun:
@@ -162,12 +176,99 @@ class RecordSolve:
         except RunStoreError as error:
             warn(f"Could not get active run: {error}")
             parent = None
-        return _RecordingContext(parent, current_annotation())
+        annotation: Annotation = current_annotation()
+        return _RecordingContext(parent, annotation, self.options.log_progress)
+
+    def start(
+        self,
+        context: object,
+        api: str,
+        solve_id: str,
+        solve_index: int,
+        start_time_ms: int,
+    ) -> SampleSink | None:
+        """The sample sink for a started solve."""
+        if not isinstance(context, _RecordingContext):
+            raise TypeError("Invalid recording context")
+        if not context.log_progress:
+            return None
+        tags: dict[str, str] = _identity_tags(api, solve_id, solve_index)
+        try:
+            run: RunReference = self._runs.start(
+                f"{api} #{solve_index}", start_time_ms, tags, context.parent
+            )
+        except RunStoreError as error:
+            warn(
+                f"Could not create the run at solve start: {error}. "
+                "The solve will be recorded after it ends."
+            )
+            return None
+        context.run = run
+
+        def write_history(points: Sequence[HistoryPoint]) -> None:
+            """The stored progress history of the solve."""
+            self._runs.log_history(run, points)
+
+        recorder: ProgressRecorder = ProgressRecorder(write_history)
+        context.recorder = recorder
+        return recorder.sample
 
     def record(self, solve: CompletedSolve, context: object) -> None:
         """Store one completed solve."""
         if not isinstance(context, _RecordingContext):
             raise TypeError("Invalid recording context")
+        status: RunStatus = RunStatus.FINISHED
+        if isinstance(solve.error, KeyboardInterrupt):
+            status = RunStatus.KILLED
+        elif isinstance(solve.error, Exception):
+            status = RunStatus.FAILED
+        run: RunReference | None = context.run
+        if run is None:
+            record: SolveRecord = self._build_record(solve, context, status)
+            try:
+                run = self._runs.save(record, context.parent)
+            except RunStoreError as error:
+                warn(f"Could not record solve: {error}")
+                return
+            _last_solve.set(SolveRun(run, self._runs, self._artifacts, self.options))
+            return
+        tags: dict[str, str] = _identity_tags(
+            solve.api, solve.solve_id, solve.solve_index
+        )
+        if solve.error is not None:
+            tags["optimization.error"] = type(solve.error).__name__
+        record = SolveRecord(
+            name=f"{solve.api} #{solve.solve_index}",
+            status=status,
+            start_time_ms=solve.start_time_ms,
+            end_time_ms=solve.end_time_ms,
+            tags=tags,
+            metrics={},
+            params={},
+        )
+        final_step: int = 0
+        try:
+            greatest_step: int | None = None
+            if context.recorder is not None:
+                greatest_step = context.recorder.close()
+            final_step = int(solve.wall_time_seconds * 1000)
+            if greatest_step is not None:
+                final_step = max(final_step, greatest_step + 1)
+            record = self._build_record(solve, context, status)
+        finally:
+            try:
+                self._runs.finish(run, record, final_step=final_step)
+            except RunStoreError as error:
+                warn(f"Could not record solve: {error}")
+            else:
+                _last_solve.set(
+                    SolveRun(run, self._runs, self._artifacts, self.options)
+                )
+
+    def _build_record(
+        self, solve: CompletedSolve, context: _RecordingContext, status: RunStatus
+    ) -> SolveRecord:
+        """The stored form of a completed solve."""
         observation: SolveObservation | None = solve.observation
         has_objective: bool | None = (
             observation.metrics.has_objective if observation is not None else None
@@ -193,17 +294,11 @@ class RecordSolve:
         tags.update(outcome_tags(outcome))
         tags.update(metrics.tags)
         tags.update(metadata.tags)
-        tags["optimization.solve_id"] = solve.solve_id
-        tags["optimization.solve_index"] = str(solve.solve_index)
+        tags.update(_identity_tags(solve.api, solve.solve_id, solve.solve_index))
         if solve.error is not None:
             tags["optimization.error"] = type(solve.error).__name__
-        status: RunStatus = RunStatus.FINISHED
-        if isinstance(solve.error, KeyboardInterrupt):
-            status = RunStatus.KILLED
-        elif isinstance(solve.error, Exception):
-            status = RunStatus.FAILED
         solver: str = metadata.tags.get("optimization.solver") or "unknown"
-        record: SolveRecord = SolveRecord(
+        return SolveRecord(
             name=f"{solve.api}/{solver} #{solve.solve_index}",
             status=status,
             start_time_ms=solve.start_time_ms,
@@ -212,13 +307,6 @@ class RecordSolve:
             metrics=metrics.values,
             params=metadata.params,
         )
-        run: RunReference
-        try:
-            run = self._runs.save(record, context.parent)
-        except RunStoreError as error:
-            warn(f"Could not record solve: {error}")
-            return
-        _last_solve.set(SolveRun(run, self._runs, self._artifacts, self.options))
 
 
 def last_solve() -> SolveRun | None:

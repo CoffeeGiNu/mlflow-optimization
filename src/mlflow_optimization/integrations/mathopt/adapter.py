@@ -1,6 +1,7 @@
 """The MathOpt solver integration."""
 
 import dataclasses
+import math
 from collections.abc import Callable, Iterable, Mapping
 from datetime import timedelta
 from enum import Enum
@@ -10,7 +11,7 @@ from types import ModuleType
 from typing import cast
 
 import ortools
-from ortools.math_opt.python import mathopt
+from ortools.math_opt.python import callback, mathopt
 from ortools.math_opt.python import solve as mathopt_solve
 from ortools.math_opt.python.model import Model
 from ortools.math_opt.python.objectives import Objective
@@ -36,6 +37,7 @@ from mlflow_optimization.features.metrics.types import (
     ReportedMetrics,
 )
 from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
+from mlflow_optimization.features.progress.types import ProgressHook
 
 ParameterValue = int | float | str | bool
 _SDK_EXCEPTION: type[Exception] = Exception
@@ -129,8 +131,28 @@ class MathOptAdapter:
             call_signature: Signature = signature(original_solve)
             call_signature.bind(*args, **kwargs)
 
-            def call() -> SolveResult:
-                return original_solve(*args, **kwargs)
+            def call(hook: ProgressHook | None) -> SolveResult:
+                if hook is None:
+                    return original_solve(*args, **kwargs)
+                progress_call: tuple[tuple[object, ...], dict[str, object]] | None = (
+                    None
+                )
+                try:
+                    progress_call = self._progress_call(
+                        hook,
+                        entry_point,
+                        args,
+                        kwargs,
+                        receiver,
+                    )
+                except Exception:  # noqa: BLE001
+                    # NOTE: Composition failures fall back to the unchanged solve call.
+                    progress_call = None
+                if progress_call is None:
+                    return original_solve(*args, **kwargs)
+                progress_arguments: tuple[object, ...] = progress_call[0]
+                progress_keywords: dict[str, object] = progress_call[1]
+                return original_solve(*progress_arguments, **progress_keywords)
 
             def extract(
                 result: SolveResult | None,
@@ -148,6 +170,102 @@ class MathOptAdapter:
             return active_observer.observe(self.api, call, extract)
 
         return wrapped_solve
+
+    def _progress_call(
+        self,
+        hook: ProgressHook,
+        entry_point: str,
+        call_arguments: tuple[object, ...],
+        call_keywords: Mapping[str, object],
+        receiver: object,
+    ) -> tuple[tuple[object, ...], dict[str, object]] | None:
+        """The MathOpt call arguments with a progress callback."""
+        solver_type: SolverType | None = self._solver_type(
+            entry_point,
+            call_arguments,
+            call_keywords,
+            receiver,
+        )
+        model: Model | None = self._model(
+            entry_point,
+            call_arguments,
+            call_keywords,
+            receiver,
+        )
+        if (
+            self._has_integer_variables(model) is not True
+            or self._has_objective(model) is False
+        ):
+            return None
+        progress_events: frozenset[callback.Event] = self._progress_events(solver_type)
+        if not progress_events:
+            return None
+        registration_value: object = call_keywords.get("callback_reg")
+        if registration_value is None:
+            user_registration: callback.CallbackRegistration = (
+                callback.CallbackRegistration()
+            )
+        elif isinstance(registration_value, callback.CallbackRegistration):
+            user_registration = registration_value
+        else:
+            return None
+        user_events: set[callback.Event] = set(user_registration.events)
+        merged_events: set[callback.Event] = set(user_events)
+        merged_events.update(progress_events)
+        merged_registration: callback.CallbackRegistration = dataclasses.replace(
+            user_registration,
+            events=merged_events,
+        )
+        user_callback_value: object = call_keywords.get("cb")
+        if user_callback_value is not None and not callable(user_callback_value):
+            return None
+        user_callback: (
+            Callable[[callback.CallbackData], callback.CallbackResult] | None
+        ) = cast(
+            Callable[[callback.CallbackData], callback.CallbackResult] | None,
+            user_callback_value,
+        )
+
+        def merged_callback(data: callback.CallbackData) -> callback.CallbackResult:
+            if data.event in progress_events:
+                try:
+                    mip_stats: callback.MipStats = data.mip_stats
+                    incumbent: float | None = None
+                    if mip_stats.HasField("primal_bound"):
+                        incumbent = self._finite_mip_stat_value(mip_stats.primal_bound)
+                    bound: float | None = None
+                    if mip_stats.HasField("dual_bound"):
+                        bound = self._finite_mip_stat_value(mip_stats.dual_bound)
+                    hook(incumbent, bound)
+                except Exception:  # noqa: BLE001,S110
+                    # NOTE: Progress hook failures must not alter MathOpt solves.
+                    pass
+            if user_callback is None or data.event not in user_events:
+                return callback.CallbackResult()
+            return user_callback(data)
+
+        progress_keywords: dict[str, object] = dict(call_keywords)
+        progress_keywords["callback_reg"] = merged_registration
+        progress_keywords["cb"] = merged_callback
+        return call_arguments, progress_keywords
+
+    def _progress_events(
+        self,
+        solver_type: SolverType | None,
+    ) -> frozenset[callback.Event]:
+        """The MathOpt events used to observe progress."""
+        if solver_type is SolverType.GSCIP:
+            return frozenset({callback.Event.MIP_SOLUTION})
+        if solver_type in {SolverType.CP_SAT, SolverType.GUROBI}:
+            return frozenset({callback.Event.MIP, callback.Event.MIP_SOLUTION})
+        return frozenset()
+
+    def _finite_mip_stat_value(self, value: object) -> float | None:
+        """A finite MathOpt MIP statistic."""
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return None
+        finite_value: float = float(value)
+        return finite_value if math.isfinite(finite_value) else None
 
     def _extract(
         self,

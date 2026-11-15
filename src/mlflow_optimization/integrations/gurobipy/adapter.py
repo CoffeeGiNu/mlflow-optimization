@@ -2,7 +2,8 @@
 
 from collections.abc import Callable
 from functools import wraps
-from math import inf
+from inspect import Parameter, Signature, signature
+from math import inf, isfinite
 from typing import Any
 
 import gurobipy
@@ -24,6 +25,7 @@ from mlflow_optimization.features.metrics.types import (
     ReportedMetrics,
 )
 from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
+from mlflow_optimization.features.progress.types import ProgressHook
 
 _STATUS_TERMINATIONS: dict[int, tuple[str, Termination]] = {
     gurobipy.GRB.LOADED: ("LOADED", Termination.UNKNOWN),
@@ -63,8 +65,20 @@ class GurobiAdapter(SolverIntegration):
                 if receiver is None:
                     return original(*args, **kwargs)
 
-                def call() -> Any:
-                    return original(*args, **kwargs)
+                def call(hook: ProgressHook | None) -> Any:
+                    if hook is None or not isinstance(receiver, gurobipy.Model):
+                        return original(*args, **kwargs)
+                    composed_arguments: (
+                        tuple[tuple[Any, ...], dict[str, Any]] | None
+                    ) = _compose_callback_arguments(
+                        original, args, kwargs, receiver, hook
+                    )
+                    if composed_arguments is None:
+                        return original(*args, **kwargs)
+                    solve_arguments: tuple[Any, ...]
+                    solve_keywords: dict[str, Any]
+                    solve_arguments, solve_keywords = composed_arguments
+                    return original(*solve_arguments, **solve_keywords)
 
                 def extract(
                     result: Any | None, error: BaseException | None
@@ -89,6 +103,116 @@ class GurobiAdapter(SolverIntegration):
 
     def uninstall(self) -> None:
         self._patch.uninstall()
+
+
+def _compose_callback_arguments(
+    original: Callable[..., Any],
+    arguments: tuple[Any, ...],
+    keywords: dict[str, Any],
+    model: gurobipy.Model,
+    hook: ProgressHook,
+) -> tuple[tuple[Any, ...], dict[str, Any]] | None:
+    try:
+        optimize_signature: Signature = signature(original)
+        optimize_signature.bind_partial(*arguments, **keywords)
+    except (TypeError, ValueError):
+        return None
+    callback_parameter: Parameter | None = optimize_signature.parameters.get("callback")
+    wheres_parameter: Parameter | None = optimize_signature.parameters.get("wheres")
+    if (
+        callback_parameter is None
+        or callback_parameter.kind is not Parameter.POSITIONAL_OR_KEYWORD
+    ):
+        return None
+    positional_parameters: tuple[Parameter, ...] = tuple(
+        parameter
+        for parameter in optimize_signature.parameters.values()
+        if parameter.kind
+        in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+    )
+    callback_position: int = positional_parameters.index(callback_parameter)
+    callback_was_positional: bool = len(arguments) > callback_position
+    user_callback: Any
+    if callback_was_positional:
+        user_callback = arguments[callback_position]
+    else:
+        user_callback = keywords.get("callback")
+    if user_callback is not None and not callable(user_callback):
+        return None
+    wheres_position: int | None = None
+    if user_callback is None:
+        if wheres_parameter is None:
+            return None
+        if wheres_parameter.kind is not Parameter.POSITIONAL_OR_KEYWORD:
+            return None
+        wheres_position = positional_parameters.index(wheres_parameter)
+    try:
+        # NOTE: Pending objective changes are invisible until Gurobi updates the model.
+        model.update()
+    except gurobipy.GurobiError:
+        return None
+    if _read_has_objective(model) is False:
+        return None
+
+    def combined_callback(callback_model: gurobipy.Model, where: int) -> None:
+        try:
+            callback_codes: tuple[int, int] | None = _callback_value_codes(where)
+            if callback_codes is not None:
+                incumbent_raw_value: Any = callback_model.cbGet(callback_codes[0])
+                bound_raw_value: Any = callback_model.cbGet(callback_codes[1])
+                incumbent_value: float | None = _finite_progress_value(
+                    incumbent_raw_value
+                )
+                bound_value: float | None = _finite_progress_value(bound_raw_value)
+                hook(incumbent_value, bound_value)
+        except Exception:  # noqa: BLE001,S110
+            # NOTE: Progress collection must not interrupt the solve.
+            pass
+        if user_callback is not None:
+            user_callback(callback_model, where)
+
+    solve_arguments: list[Any] = list(arguments)
+    if callback_was_positional:
+        solve_arguments[callback_position] = combined_callback
+    solve_keywords: dict[str, Any] = dict(keywords)
+    if not callback_was_positional:
+        solve_keywords["callback"] = combined_callback
+    if wheres_position is not None:
+        progress_wheres: list[int] = [
+            gurobipy.GRB.Callback.MIP,
+            gurobipy.GRB.Callback.MIPSOL,
+        ]
+        if len(arguments) > wheres_position:
+            solve_arguments[wheres_position] = progress_wheres
+        else:
+            solve_keywords["wheres"] = progress_wheres
+    return tuple(solve_arguments), solve_keywords
+
+
+def _callback_value_codes(where: int) -> tuple[int, int] | None:
+    if where == gurobipy.GRB.Callback.MIP:
+        return (
+            gurobipy.GRB.Callback.MIP_OBJBST,
+            gurobipy.GRB.Callback.MIP_OBJBND,
+        )
+    if where == gurobipy.GRB.Callback.MIPSOL:
+        return (
+            gurobipy.GRB.Callback.MIPSOL_OBJBST,
+            gurobipy.GRB.Callback.MIPSOL_OBJBND,
+        )
+    return None
+
+
+def _finite_progress_value(value: Any) -> float | None:
+    try:
+        numeric_value: float = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not isfinite(numeric_value):
+        return None
+    if abs(numeric_value) >= gurobipy.GRB.INFINITY:
+        return None
+    return numeric_value
 
 
 def _extract(model: gurobipy.Model, error: BaseException | None) -> SolveObservation:

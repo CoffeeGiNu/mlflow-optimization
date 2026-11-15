@@ -17,6 +17,7 @@ def autolog(
     log_solver_parameters: bool = True,
     log_solver_metrics: bool = True,
     log_artifacts: bool = True,
+    log_progress: bool = True,
 ) -> None:
     """Configure automatic logging of optimization solves.
 
@@ -33,6 +34,8 @@ def autolog(
         Whether native solver metrics are logged.
     log_artifacts : bool, default True
         Whether files attached through ``SolveRun.log_artifact`` are logged.
+    log_progress : bool, default True
+        Whether incumbent, bound and gaps are logged as metric history while a solve runs.
 
     Raises
     ------
@@ -47,4 +50,5 @@ def autolog(
         log_solver_parameters=log_solver_parameters,
         log_solver_metrics=log_solver_metrics,
         log_artifacts=log_artifacts,
+        log_progress=log_progress,
     )
