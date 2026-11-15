@@ -23,6 +23,7 @@ from mlflow_optimization.features.metrics.types import (
     ReportedMetrics,
 )
 from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
+from mlflow_optimization.features.progress.types import ProgressHook
 from pyomo.core.base.block import BlockData
 from pyomo.opt.base.solvers import OptSolver
 
@@ -219,14 +220,10 @@ class PyomoAdapter:
                                 solver_time_before,
                             )
 
-                        return solve_observer.observe(
-                            self.api,
-                            lambda: original(
-                                *solve_arguments,
-                                **solve_keywords,
-                            ),
-                            extract,
-                        )
+                        def call(hook: ProgressHook | None) -> Any:
+                            return original(*solve_arguments, **solve_keywords)
+
+                        return solve_observer.observe(self.api, call, extract)
 
                     return wrapped
 

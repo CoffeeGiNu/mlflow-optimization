@@ -17,6 +17,7 @@ from mlflow_optimization.features.metrics.types import (
     ReportedMetrics,
 )
 from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
+from mlflow_optimization.features.progress.types import ProgressHook
 
 
 class FakeFrontend:
@@ -47,7 +48,7 @@ class FakeFrontendAdapter:
             original: Callable[[FakeFrontend], str],
         ) -> Callable[[FakeFrontend], str]:
             def observed(modeling_layer: FakeFrontend) -> str:
-                def call() -> str:
+                def call(hook: ProgressHook | None) -> str:
                     return original(modeling_layer)
 
                 def extract(
@@ -99,7 +100,7 @@ class FakeFrontendAdapter:
                     )
 
                 if self._observer is None:
-                    return call()
+                    return call(None)
                 return self._observer.observe(self.api, call, extract)
 
             return observed

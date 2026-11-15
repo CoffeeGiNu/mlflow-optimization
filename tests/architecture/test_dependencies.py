@@ -17,10 +17,12 @@ FEATURE_IMPORT_RULES: dict[str, dict[str, frozenset[str] | None]] = {
         "metadata": frozenset({"types"}),
         "metrics": frozenset({"types"}),
         "outcomes": frozenset({"types"}),
+        "progress": frozenset({"types"}),
     },
     "metadata": {},
     "metrics": {},
     "outcomes": {},
+    "progress": {"metrics": None},
     "runs": {
         "annotations": None,
         "artifacts": None,
@@ -28,6 +30,7 @@ FEATURE_IMPORT_RULES: dict[str, dict[str, frozenset[str] | None]] = {
         "metadata": None,
         "metrics": None,
         "outcomes": None,
+        "progress": None,
     },
 }
 INTEGRATION_SDK_PREFIXES: dict[str, frozenset[str]] = {
@@ -50,6 +53,7 @@ IMPORT_CONTAINERS: frozenset[str] = frozenset(
         f"{PACKAGE_NAME}.features.metadata",
         f"{PACKAGE_NAME}.features.metrics",
         f"{PACKAGE_NAME}.features.outcomes",
+        f"{PACKAGE_NAME}.features.progress",
         f"{PACKAGE_NAME}.features.runs",
     }
 )

@@ -26,6 +26,7 @@ from mlflow_optimization.features.metrics.types import (
     ReportedMetrics,
 )
 from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
+from mlflow_optimization.features.progress.types import ProgressHook
 
 _SDK_EXCEPTION: type[Exception] = Exception
 _STATUSES: dict[int, tuple[str, Termination]] = {
@@ -185,7 +186,7 @@ class RoutingAdapter(SolverIntegration):
                     kwargs,
                 )
 
-                def call() -> Any:
+                def call(hook: ProgressHook | None) -> Any:
                     return original(*args, **kwargs)
 
                 def extract(

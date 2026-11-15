@@ -1,9 +1,9 @@
 """Contract of the run storage."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Protocol
 
-from .types import RunReference, SolveRecord
+from .types import HistoryPoint, RunReference, SolveRecord
 
 
 class RunStoreError(Exception):
@@ -15,6 +15,26 @@ class RunStore(Protocol):
 
     def active_run(self) -> RunReference | None:
         """The user's currently active run."""
+        ...
+
+    def start(
+        self,
+        name: str,
+        start_time_ms: int,
+        tags: Mapping[str, str],
+        parent: RunReference | None,
+    ) -> RunReference:
+        """A newly started solve run."""
+        ...
+
+    def log_history(self, run: RunReference, points: Sequence[HistoryPoint]) -> None:
+        """History points of an existing run."""
+        ...
+
+    def finish(
+        self, run: RunReference, record: SolveRecord, *, final_step: int
+    ) -> None:
+        """The final record of an existing run."""
         ...
 
     def save(self, record: SolveRecord, parent: RunReference | None) -> RunReference:

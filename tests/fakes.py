@@ -1,6 +1,6 @@
 """A fake solver API for adapter tests."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from mlflow_optimization.common.patching import Patch
 from mlflow_optimization.features.autolog.ports import SolveObserver
@@ -15,6 +15,7 @@ from mlflow_optimization.features.metrics.types import (
     ReportedMetrics,
 )
 from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
+from mlflow_optimization.features.progress.types import ProgressHook
 
 
 class FakeSolver:
@@ -32,6 +33,7 @@ class FakeSolver:
         statistics: dict[str, float] | None = None,
         raises: BaseException | None = None,
         during_solve: Callable[[], None] | None = None,
+        progress_samples: Sequence[tuple[float | None, float | None]] = (),
     ) -> None:
         self.status: str | Termination = status
         self.has_solution: bool = has_solution
@@ -46,9 +48,15 @@ class FakeSolver:
         )
         self.raises: BaseException | None = raises
         self.during_solve: Callable[[], None] | None = during_solve
+        self.progress_samples: tuple[tuple[float | None, float | None], ...] = tuple(
+            progress_samples
+        )
 
-    def solve(self) -> str:
+    def solve(self, hook: ProgressHook | None = None) -> str:
         """The configured solver termination status."""
+        if hook is not None:
+            for incumbent_value, bound_value in self.progress_samples:
+                hook(incumbent_value, bound_value)
         if self.during_solve is not None:
             self.during_solve()
         if self.raises is not None:
@@ -72,11 +80,11 @@ class FakeSolverAdapter:
         self._observer = observer
 
         def factory(
-            original: Callable[[FakeSolver], str],
+            original: Callable[..., str],
         ) -> Callable[[FakeSolver], str]:
             def observed(solver: FakeSolver) -> str:
-                def call() -> str:
-                    return original(solver)
+                def call(hook: ProgressHook | None) -> str:
+                    return original(solver, hook)
 
                 def extract(
                     result: str | None, error: BaseException | None
@@ -125,7 +133,7 @@ class FakeSolverAdapter:
                     )
 
                 if self._observer is None:
-                    return call()
+                    return call(None)
                 return self._observer.observe(self.api, call, extract)
 
             return observed

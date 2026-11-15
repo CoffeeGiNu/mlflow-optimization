@@ -28,6 +28,9 @@ from mlflow_optimization.features.metrics.types import (
     ReportedMetrics,
 )
 from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termination
+from mlflow_optimization.features.progress.types import ProgressHook
+from pyscipopt import Eventhdlr
+from pyscipopt.scip import PY_SCIP_EVENTTYPE as SCIP_EVENTTYPE
 
 _STATUS_TERMINATIONS: dict[str, Termination] = {
     "unknown": Termination.UNKNOWN,
@@ -49,6 +52,58 @@ _STATUS_TERMINATIONS: dict[str, Termination] = {
     "bestsollimit": Termination.SOLUTION_LIMIT,
     "restartlimit": Termination.OTHER_LIMIT,
 }
+
+
+class _ProgressEventHandler(Eventhdlr):
+    """A PySCIPOpt event handler for solve progress."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.included: bool = False
+        self.hook: ProgressHook | None = None
+
+    def start(self, hook: ProgressHook) -> None:
+        """The active hook for one solve."""
+        self.hook = hook
+
+    def stop(self) -> None:
+        """The inactive state after a solve."""
+        self.hook = None
+
+    def eventinit(self) -> None:
+        """The subscriptions for one active solve."""
+        if self.hook is None:
+            return
+        try:
+            self.model.catchEvent(SCIP_EVENTTYPE.BESTSOLFOUND, self)
+            self.model.catchEvent(SCIP_EVENTTYPE.DUALBOUNDIMPROVED, self)
+        except Exception:  # noqa: BLE001
+            # NOTE: Event registration failures must not interrupt SCIP.
+            self.hook = None
+
+    def eventexec(self, event: Any) -> None:
+        """A callback for one PySCIPOpt progress event."""
+        progress_hook: ProgressHook | None = self.hook
+        if progress_hook is None:
+            return
+        try:
+            model: Any = self.model
+            solver_infinity: float = float(model.infinity())
+            incumbent: float | None = None
+            solution_count: int = int(model.getNSols())
+            if solution_count > 0:
+                incumbent = _optional_progress_bound(
+                    float(model.getPrimalbound()),
+                    solver_infinity,
+                )
+            dual_bound: float | None = _optional_progress_bound(
+                float(model.getDualbound()),
+                solver_infinity,
+            )
+            progress_hook(incumbent, dual_bound)
+        # NOTE: Progress callback failures must not interrupt SCIP.
+        except Exception:  # noqa: BLE001,S110
+            pass
 
 
 class PyScipOptAdapter:
@@ -95,6 +150,7 @@ class PyScipOptAdapter:
                 original_entry_point,
                 integration,
                 default_parameters,
+                records_progress=entry_point_name == "optimize",
             )
             setattr(LoggingModel, entry_point_name, observed_entry_point)
 
@@ -134,6 +190,7 @@ def _wrap_solve_entry_point(
     original_entry_point: Callable[..., Any],
     integration: PyScipOptAdapter,
     default_parameters: dict[str, bool | int | float | str] | None,
+    records_progress: bool,
 ) -> Callable[..., Any]:
     """An observed wrapper for one original PySCIPOpt solve entry point."""
     original_signature: Signature = signature(original_entry_point)
@@ -192,8 +249,27 @@ def _wrap_solve_entry_point(
             default_parameters,
         )
 
-        def call() -> Any:
-            return original_entry_point(*args, **kwargs)
+        def call(progress_hook: ProgressHook | None) -> Any:
+            effective_progress_hook: ProgressHook | None = (
+                progress_hook if records_progress else None
+            )
+            if (
+                effective_progress_hook is not None
+                and _read_has_objective(model) is False
+            ):
+                effective_progress_hook = None
+            if effective_progress_hook is None:
+                return original_entry_point(*args, **kwargs)
+            progress_handler: _ProgressEventHandler | None = _include_progress_handler(
+                model
+            )
+            if progress_handler is None:
+                return original_entry_point(*args, **kwargs)
+            progress_handler.start(effective_progress_hook)
+            try:
+                return original_entry_point(*args, **kwargs)
+            finally:
+                progress_handler.stop()
 
         def extract(
             result: Any | None, error: BaseException | None
@@ -236,6 +312,37 @@ def _wrap_solve_entry_point(
         return observer.observe(integration.api, call, extract)
 
     return observed_entry_point
+
+
+def _include_progress_handler(model: Any) -> _ProgressEventHandler | None:
+    """The included progress event handler for one model."""
+    # NOTE: Progress handler installation must not change the solver call.
+    try:
+        progress_handler: Any = getattr(
+            model,
+            "_mlflow_optimization_progress_handler",
+            None,
+        )
+        if not isinstance(progress_handler, _ProgressEventHandler):
+            progress_handler = _ProgressEventHandler()
+            model._mlflow_optimization_progress_handler = progress_handler
+        if not progress_handler.included:
+            model.includeEventhdlr(
+                progress_handler,
+                f"mlflow_optimization_progress_{id(model)}",
+                "Progress events for one PySCIPOpt model",
+            )
+            progress_handler.included = True
+    except Exception:  # noqa: BLE001
+        return None
+    return progress_handler
+
+
+def _optional_progress_bound(value: float, solver_infinity: float) -> float | None:
+    """A finite PySCIPOpt progress bound, if one is available."""
+    if not math.isfinite(value) or abs(value) >= solver_infinity:
+        return None
+    return value
 
 
 def _extract_observation(

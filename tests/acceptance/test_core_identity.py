@@ -12,6 +12,7 @@ from mlflow.entities import Run, RunData
 from mlflow.tracking.fluent import ActiveRun
 
 from mlflow_optimization import autolog, context
+from mlflow_optimization.features.progress.types import ProgressHook
 
 if TYPE_CHECKING:
     from conftest import Tracking
@@ -199,13 +200,16 @@ def test_inherited_async_task_observes_solves_after_outer_solve_ends(
             solver: FakeSolver = FakeSolver(parameters={"threads": 2})
             return solver.solve()
 
-        def schedule_task_during_solve(solver: FakeSolver) -> str:
+        def schedule_task_during_solve(
+            solver: FakeSolver,
+            hook: ProgressHook | None = None,
+        ) -> str:
             nonlocal inherited_task
             nonlocal schedule_inherited_task
             if schedule_inherited_task:
                 schedule_inherited_task = False
                 inherited_task = asyncio.create_task(solve_after_outer())
-            return original_solve(solver)
+            return original_solve(solver, hook)
 
         monkeypatch.setattr(FakeSolver, "solve", schedule_task_during_solve)
         autolog(libraries=["fake"])

@@ -27,6 +27,26 @@ def _record_reported_metric(
     missing[metric_name] = MissingReason.UNDEFINED
 
 
+def calculate_gaps(
+    objective_value: float,
+    dual_bound: float,
+) -> tuple[float | None, float | None]:
+    """Absolute and relative gaps for finite objective and bound values."""
+    absolute_difference: float = abs(objective_value - dual_bound)
+    absolute_gap: float | None = (
+        absolute_difference if isfinite(absolute_difference) else None
+    )
+    if absolute_gap is None:
+        return None, None
+    relative_gap: float | None
+    if objective_value == 0.0:
+        relative_gap = 0.0 if absolute_gap == 0.0 else None
+        return absolute_gap, relative_gap
+    relative_difference: float = absolute_gap / abs(objective_value)
+    relative_gap = relative_difference if isfinite(relative_difference) else None
+    return absolute_gap, relative_gap
+
+
 def normalize_metrics(
     reported: ReportedMetrics | None,
     *,
@@ -88,22 +108,19 @@ def normalize_metrics(
             missing["absolute_gap"] = missing["dual_bound"]
             missing["relative_gap"] = missing["dual_bound"]
         else:
-            absolute_gap: float = abs(values["objective_value"] - values["dual_bound"])
-            if isfinite(absolute_gap):
+            absolute_gap: float | None
+            relative_gap: float | None
+            absolute_gap, relative_gap = calculate_gaps(
+                values["objective_value"],
+                values["dual_bound"],
+            )
+            if absolute_gap is not None:
                 values["absolute_gap"] = absolute_gap
-                if values["objective_value"] == 0.0:
-                    if absolute_gap == 0.0:
-                        values["relative_gap"] = 0.0
-                    else:
-                        missing["relative_gap"] = MissingReason.UNDEFINED
-                else:
-                    relative_gap: float = absolute_gap / abs(values["objective_value"])
-                    if isfinite(relative_gap):
-                        values["relative_gap"] = relative_gap
-                    else:
-                        missing["relative_gap"] = MissingReason.UNDEFINED
             else:
                 missing["absolute_gap"] = MissingReason.UNDEFINED
+            if relative_gap is not None:
+                values["relative_gap"] = relative_gap
+            else:
                 missing["relative_gap"] = MissingReason.UNDEFINED
 
     for metric_name in COMMON_METRICS:

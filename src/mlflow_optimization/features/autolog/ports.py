@@ -3,6 +3,8 @@
 from collections.abc import Callable
 from typing import Protocol
 
+from mlflow_optimization.features.progress.types import ProgressHook, SampleSink
+
 from .types import CompletedSolve, SolveObservation
 
 
@@ -16,10 +18,10 @@ class SolveObserver(Protocol):
     def observe[T](
         self,
         api: str,
-        call: Callable[[], T],
+        call: Callable[[ProgressHook | None], T],
         extract: Callable[[T | None, BaseException | None], SolveObservation],
     ) -> T:
-        """The result of ``call()``, observed as one solve unless nested or disabled."""
+        """The result of ``call(hook)``, observed as one solve unless nested or disabled."""
         ...
 
 
@@ -42,6 +44,17 @@ class SolveSink(Protocol):
 
     def begin(self) -> object:
         """The recording context captured at solve start."""
+        ...
+
+    def start(
+        self,
+        context: object,
+        api: str,
+        solve_id: str,
+        solve_index: int,
+        start_time_ms: int,
+    ) -> SampleSink | None:
+        """The sampler for an observed solve, if progress recording is active."""
         ...
 
     def record(self, solve: CompletedSolve, context: object) -> None:

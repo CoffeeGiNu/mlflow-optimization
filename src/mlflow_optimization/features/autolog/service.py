@@ -10,6 +10,7 @@ from typing import cast
 from uuid import uuid4
 
 from mlflow_optimization.common.diagnostics import warn
+from mlflow_optimization.features.progress.types import ProgressHook, SampleSink
 
 from .ports import SolverIntegration, SolveSink
 from .types import CompletedSolve, SolveObservation
@@ -60,13 +61,13 @@ class AutologManager:
     def observe[T](
         self,
         api: str,
-        call: Callable[[], T],
+        call: Callable[[ProgressHook | None], T],
         extract: Callable[[T | None, BaseException | None], SolveObservation],
     ) -> T:
-        """The result of ``call()``, observed as one solve unless nested or disabled."""
+        """The result of ``call(hook)``, observed as one solve unless nested or disabled."""
         parent: _SolveScope | None = _observing.get()
         if not self._enabled or (parent is not None and parent.active):
-            return call()
+            return call(None)
         scope: _SolveScope = _SolveScope()
         token: Token[_SolveScope | None] = _observing.set(scope)
         try:
@@ -89,6 +90,24 @@ class AutologManager:
                 solve_index: int = next(_solve_indices)
             solve_id: str = uuid4().hex
             start_time_ms: int = int(time() * 1000)
+            sample_sink: SampleSink | None = cast(
+                SampleSink | None,
+                guard(
+                    "start",
+                    lambda: self._sink.start(
+                        context, api, solve_id, solve_index, start_time_ms
+                    ),
+                ),
+            )
+            progress_hook: ProgressHook | None = None
+            if sample_sink is not None:
+                sink: SampleSink = sample_sink
+
+                def progress(incumbent: float | None, bound: float | None) -> None:
+                    """A progress sample from the solve."""
+                    sink(start, incumbent, bound)
+
+                progress_hook = progress
             result: T | None = None
 
             def finish(solve: CompletedSolve) -> None:
@@ -106,7 +125,7 @@ class AutologManager:
 
             start: float = perf_counter()
             try:
-                result = call()
+                result = call(progress_hook)
             except BaseException as error:
                 end: float = perf_counter()
                 scope.active = False

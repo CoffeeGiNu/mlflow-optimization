@@ -39,6 +39,7 @@ def configure(
     log_solver_parameters: bool,
     log_solver_metrics: bool,
     log_artifacts: bool,
+    log_progress: bool,
 ) -> None:
     """Apply an autolog configuration to the process-wide wiring."""
     global _autolog_manager
@@ -65,6 +66,7 @@ def configure(
                 log_solver_parameters=log_solver_parameters,
                 log_solver_metrics=log_solver_metrics,
                 log_artifacts=log_artifacts,
+                log_progress=log_progress,
             )
         record_solve: RecordSolve = RecordSolve(
             run_store, artifact_store, record_options
@@ -79,6 +81,7 @@ def configure(
             _record_solve.options.log_solver_parameters = log_solver_parameters
             _record_solve.options.log_solver_metrics = log_solver_metrics
             _record_solve.options.log_artifacts = log_artifacts
+            _record_solve.options.log_progress = log_progress
 
     assert _autolog_manager is not None
     if disable:

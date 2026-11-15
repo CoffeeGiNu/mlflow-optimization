@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 
 import gurobipy
@@ -6,6 +7,61 @@ from conftest import Tracking
 from mlflow.entities import Run
 
 from mlflow_optimization import autolog
+
+
+@pytest.mark.parametrize(
+    ("has_user_callback", "user_wheres"),
+    ((False, None), (True, None), (True, [gurobipy.GRB.Callback.MIPSOL])),
+)
+def test_progress_filters_only_its_own_callback(
+    tracking: Tracking,
+    monkeypatch: pytest.MonkeyPatch,
+    has_user_callback: bool,
+    user_wheres: list[int] | None,
+) -> None:
+    original_optimize = gurobipy.Model.optimize
+    observed_wheres: list[list[int] | None] = []
+
+    def inspect_optimize(
+        model: gurobipy.Model,
+        callback: Callable[[gurobipy.Model, int], None] | None = None,
+        wheres: list[int] | None = None,
+    ) -> None:
+        assert callback is not None
+        assert callback is not user_callback
+        observed_wheres.append(wheres)
+        original_optimize(model, callback, wheres=wheres)
+
+    user_events: list[int] = []
+
+    def user_callback(model: gurobipy.Model, where: int) -> None:
+        user_events.append(where)
+
+    with monkeypatch.context() as sdk:
+        sdk.setattr(gurobipy.Model, "optimize", inspect_optimize)
+        autolog(libraries=["gurobipy"])
+        try:
+            with _new_model() as model:
+                variable: gurobipy.Var = model.addVar(vtype=gurobipy.GRB.BINARY)
+                model.setObjective(variable, gurobipy.GRB.MAXIMIZE)
+                if has_user_callback:
+                    model.optimize(user_callback, wheres=user_wheres)
+                else:
+                    model.optimize()
+        finally:
+            autolog(disable=True)
+
+    expected_wheres: list[int] | None = (
+        user_wheres
+        if has_user_callback
+        else [gurobipy.GRB.Callback.MIP, gurobipy.GRB.Callback.MIPSOL]
+    )
+    assert observed_wheres == [expected_wheres]
+    if has_user_callback:
+        assert user_events
+        if user_wheres is not None:
+            assert set(user_events).issubset(user_wheres)
+    _recorded_run(tracking)
 
 
 def _new_model() -> gurobipy.Model:
