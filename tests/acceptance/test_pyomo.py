@@ -458,3 +458,140 @@ def test_legacy_solution_entry_status_controls_feasibility(
     tags: dict[str, str] = run.data.tags
     assert tags["optimization.termination"] == expected_termination
     assert tags["optimization.has_solution"] == expected_has_solution
+
+
+def _artifact_paths(tracking: Any, run: Run) -> set[str]:
+    paths: set[str] = set()
+    pending: list[str] = [""]
+    while pending:
+        directory: str = pending.pop()
+        for entry in tracking.client.list_artifacts(run.info.run_id, directory or None):
+            if entry.is_dir:
+                pending.append(entry.path)
+            else:
+                paths.add(entry.path)
+    return paths
+
+
+def _artifact_text(tracking: Any, run: Run, path: str) -> str:
+    local_path: str = tracking.client.download_artifacts(run.info.run_id, path)
+    return Path(local_path).read_text()
+
+
+def _infeasible_model() -> Any:
+    model: Any = ConcreteModel()
+    model.value = Var(bounds=(0, 1))
+    model.lower_bound = Constraint(expr=cast(Any, model.value) >= 2)
+    model.objective = Objective(expr=model.value, sense=minimize)
+    return model
+
+
+def test_highs_unbounded_run_marks_objective_unbounded(tracking: Any) -> None:
+    autolog(libraries=["pyomo"])
+    solver: Any = _solver_or_skip("appsi_highs")
+    model: Any = ConcreteModel()
+    model.value = Var(bounds=(0, None))
+    model.objective = Objective(expr=model.value, sense=maximize)
+
+    solver.solve(model, load_solutions=False)
+
+    run: Run = _single_solve_run(tracking)
+    assert run.data.tags["optimization.termination"] == "unbounded"
+    assert run.data.tags["optimization.has_solution"] == "false"
+    assert "objective_value" not in run.data.metrics
+    assert run.data.tags["optimization.missing.objective_value"] == "unbounded"
+
+
+def test_appsi_highs_attaches_log_and_model_and_restores_logfile(
+    tracking: Any, tmp_path: Path
+) -> None:
+    autolog(libraries=["pyomo"], log_solver_log=True, log_solver_model=True)
+    solver: Any = _solver_or_skip("appsi_highs")
+    user_logfile: str = str(tmp_path / "user.log")
+    solver.config.logfile = user_logfile
+
+    solver.solve(_bounded_model(minimize))
+
+    run: Run = _single_solve_run(tracking)
+    assert {"solver/log.txt", "model/model.lp"} <= _artifact_paths(tracking, run)
+    assert _artifact_text(tracking, run, "solver/log.txt").strip()
+    assert run.data.tags["optimization.artifacts.solver_log"] == "true"
+    assert run.data.tags["optimization.artifacts.solver_model"] == "true"
+    assert solver.config.logfile == user_logfile
+
+
+def test_appsi_highs_records_presolved_problem_size(tracking: Any) -> None:
+    autolog(libraries=["pyomo"])
+    solver: Any = _solver_or_skip("appsi_highs")
+
+    solver.solve(_bounded_model(minimize))
+
+    run: Run = _single_solve_run(tracking)
+    assert int(run.data.params["problem.presolved_num_variables"]) >= 0
+    assert int(run.data.params["problem.presolved_num_constraints"]) >= 0
+
+
+def test_direct_interface_solver_log_is_marked_unsupported(tracking: Any) -> None:
+    autolog(libraries=["pyomo"], log_solver_log=True)
+    solver: Any = _solver_or_skip("gurobi_direct")
+
+    solver.solve(_bounded_model(minimize))
+
+    run: Run = _single_solve_run(tracking)
+    assert run.data.tags["optimization.artifacts.solver_log"] == "unsupported"
+    assert "solver/log.txt" not in _artifact_paths(tracking, run)
+
+
+def test_gurobi_infeasible_run_attaches_iis(tracking: Any) -> None:
+    autolog(libraries=["pyomo"], diagnose_infeasibility=True)
+    solver: Any = _solver_or_skip("gurobi_persistent")
+    solver.set_instance(_infeasible_model())
+
+    solver.solve(load_solutions=False)
+
+    run: Run = _single_solve_run(tracking)
+    assert run.data.tags["optimization.diagnostics.infeasibility"] == "iis"
+    assert "diagnostics/iis.ilp" in _artifact_paths(tracking, run)
+
+
+def test_pyomo_over_gurobipy_attaches_artifacts_to_pyomo_run_only(
+    tracking: Any,
+) -> None:
+    autolog(
+        libraries=["pyomo", "gurobipy"],
+        log_solver_model=True,
+        diagnose_infeasibility=True,
+    )
+    solver: Any = _solver_or_skip("gurobi_direct")
+
+    solver.solve(_infeasible_model(), load_solutions=False)
+
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 1
+    assert runs[0].data.tags["optimization.api"] == "pyomo"
+    paths: list[str] = sorted(_artifact_paths(tracking, runs[0]))
+    assert paths.count("model/model.lp") == 1
+    assert not any(path.endswith(".mps") for path in paths)
+
+
+def test_log_artifacts_false_disables_artifact_and_diagnostic_options(
+    tracking: Any,
+) -> None:
+    autolog(
+        libraries=["pyomo"],
+        log_artifacts=False,
+        log_solver_log=True,
+        log_solver_model=True,
+        diagnose_infeasibility=True,
+    )
+    solver: Any = _solver_or_skip("appsi_highs")
+
+    solver.solve(_infeasible_model(), load_solutions=False)
+
+    run: Run = _single_solve_run(tracking)
+    assert _artifact_paths(tracking, run) == set()
+    assert not [
+        tag
+        for tag in run.data.tags
+        if tag.startswith(("optimization.artifacts.", "optimization.diagnostics."))
+    ]
