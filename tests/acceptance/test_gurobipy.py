@@ -180,6 +180,7 @@ def test_infeasible_mip_has_no_objective_value(tracking: Tracking) -> None:
     assert solve_run.data.tags["optimization.has_solution"] == "false"
     assert "objective_value" not in solve_run.data.metrics
     assert solve_run.data.tags["optimization.missing.objective_value"] == "no_solution"
+    assert solve_run.data.tags["optimization.missing.dual_bound"] == "undefined"
 
 
 def test_unbounded_status_is_recorded(tracking: Tracking) -> None:
@@ -196,7 +197,7 @@ def test_unbounded_status_is_recorded(tracking: Tracking) -> None:
     assert solve_run.data.tags["optimization.raw_status"].startswith("UNBOUNDED (")
     assert solve_run.data.tags["optimization.has_solution"] == "false"
     assert "objective_value" not in solve_run.data.metrics
-    assert solve_run.data.tags["optimization.missing.objective_value"] == "no_solution"
+    assert solve_run.data.tags["optimization.missing.objective_value"] == "unbounded"
 
 
 def test_infeasible_or_unbounded_status_is_not_resolved_by_guessing(
@@ -328,3 +329,173 @@ def test_explicit_parameter_is_recorded_without_paths_or_secrets(
     assert "solver_param.CSAPISecret" not in solve_run.data.params
     assert str(log_file) not in solve_run.data.params.values()
     assert secret not in solve_run.data.params.values()
+
+
+def _artifact_paths(tracking: Tracking, run: Run, directory: str = "") -> set[str]:
+    paths: set[str] = set()
+    for artifact in tracking.client.list_artifacts(run.info.run_id, directory or None):
+        if artifact.is_dir:
+            paths |= _artifact_paths(tracking, run, artifact.path)
+        else:
+            paths.add(artifact.path)
+    return paths
+
+
+def _artifact_file(tracking: Tracking, run: Run, path: str, tmp_path: Path) -> Path:
+    return Path(
+        tracking.client.download_artifacts(run.info.run_id, path, str(tmp_path))
+    )
+
+
+def _infeasible_model() -> gurobipy.Model:
+    model: gurobipy.Model = _new_model()
+    variable: gurobipy.Var = model.addVar(vtype=gurobipy.GRB.BINARY)
+    model.addConstr(variable >= 1)
+    model.addConstr(variable <= 0)
+    model.setObjective(variable)
+    return model
+
+
+def _linear_program() -> gurobipy.Model:
+    model: gurobipy.Model = _new_model()
+    first_variable: gurobipy.Var = model.addVar(name="x")
+    second_variable: gurobipy.Var = model.addVar(name="y")
+    model.addConstr(first_variable + second_variable <= 4)
+    model.addConstr(first_variable + 3 * second_variable <= 6)
+    model.setObjective(3 * first_variable + 2 * second_variable, gurobipy.GRB.MAXIMIZE)
+    return model
+
+
+def test_infeasible_solve_attaches_requested_artifacts(
+    tracking: Tracking, tmp_path: Path
+) -> None:
+    autolog(
+        libraries=["gurobipy"],
+        log_solver_log=True,
+        log_solver_model=True,
+        diagnose_infeasibility=True,
+    )
+
+    _infeasible_model().optimize()
+
+    run: Run = _recorded_run(tracking)
+    assert {"solver/log.txt", "model/model.mps", "diagnostics/iis.ilp"} <= (
+        _artifact_paths(tracking, run)
+    )
+    assert _artifact_file(tracking, run, "solver/log.txt", tmp_path).stat().st_size > 0
+    tags: dict[str, str] = run.data.tags
+    assert tags["optimization.artifacts.solver_log"] == "true"
+    assert tags["optimization.artifacts.solver_model"] == "true"
+    assert tags["optimization.diagnostics.infeasibility"] == "iis"
+    assert "optimization.diagnostics.iis_minimal" in tags
+
+
+def test_attached_model_resolves_to_the_same_optimum(
+    tracking: Tracking, tmp_path: Path
+) -> None:
+    autolog(libraries=["gurobipy"], log_solver_model=True)
+    model: gurobipy.Model = _linear_program()
+    model.optimize()
+    autolog(disable=True)
+
+    run: Run = _recorded_run(tracking)
+    model_file: Path = _artifact_file(tracking, run, "model/model.mps", tmp_path)
+    with gurobipy.read(str(model_file)) as reloaded:
+        reloaded.Params.OutputFlag = 0
+        reloaded.optimize()
+        assert reloaded.Status == gurobipy.GRB.OPTIMAL
+        assert reloaded.ObjVal == pytest.approx(model.ObjVal)
+
+
+def test_user_log_file_keeps_content_and_settings(
+    tracking: Tracking, tmp_path: Path
+) -> None:
+    user_log: Path = tmp_path / "user.log"
+    user_log.write_text("previous content\n")
+    autolog(libraries=["gurobipy"], log_solver_log=True)
+    model: gurobipy.Model = _linear_program()
+    model.Params.LogFile = str(user_log)
+    model.Params.OutputFlag = 1
+    model.Params.LogToConsole = 0
+
+    model.optimize()
+
+    assert model.Params.LogFile == str(user_log)
+    assert model.Params.OutputFlag == 1
+    assert model.Params.LogToConsole == 0
+    user_text: str = user_log.read_text()
+    assert user_text.startswith("previous content")
+    run: Run = _recorded_run(tracking)
+    attached: str = _artifact_file(
+        tracking, run, "solver/log.txt", tmp_path
+    ).read_text()
+    assert attached.strip()
+    assert "previous content" not in attached
+    assert attached.strip() in user_text
+
+
+def test_silenced_user_solve_stays_silent_and_is_restored(
+    tracking: Tracking, tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    autolog(libraries=["gurobipy"], log_solver_log=True)
+    model: gurobipy.Model = _linear_program()
+    model.Params.OutputFlag = 0
+    model.Params.LogToConsole = 1
+    model.Params.LogFile = ""
+
+    model.optimize()
+
+    assert capfd.readouterr().out == ""
+    assert model.Params.OutputFlag == 0
+    assert model.Params.LogToConsole == 1
+    assert model.Params.LogFile == ""
+    run: Run = _recorded_run(tracking)
+    assert _artifact_file(tracking, run, "solver/log.txt", tmp_path).stat().st_size > 0
+    assert run.data.tags["optimization.artifacts.solver_log"] == "true"
+
+
+def test_raising_solve_still_attaches_log(tracking: Tracking, tmp_path: Path) -> None:
+    autolog(libraries=["gurobipy"], log_solver_log=True)
+    model: gurobipy.Model = _new_model()
+    model.Params.NonConvex = 0
+    variable: gurobipy.Var = model.addVar(lb=-1, ub=1)
+    model.setObjective(variable * variable, gurobipy.GRB.MAXIMIZE)
+
+    with pytest.raises(gurobipy.GurobiError):
+        model.optimize()
+
+    run: Run = _recorded_run(tracking)
+    assert _artifact_file(tracking, run, "solver/log.txt", tmp_path).stat().st_size > 0
+    assert run.data.tags["optimization.artifacts.solver_log"] == "true"
+
+
+def test_log_artifacts_off_disables_all_automatic_artifacts(
+    tracking: Tracking,
+) -> None:
+    autolog(
+        libraries=["gurobipy"],
+        log_artifacts=False,
+        log_solver_log=True,
+        log_solver_model=True,
+        diagnose_infeasibility=True,
+    )
+
+    _infeasible_model().optimize()
+
+    run: Run = _recorded_run(tracking)
+    assert _artifact_paths(tracking, run) == set()
+    assert not [
+        tag
+        for tag in run.data.tags
+        if tag.startswith(("optimization.artifacts.", "optimization.diagnostics."))
+    ]
+
+
+def test_optimal_solve_gets_no_infeasibility_diagnosis(tracking: Tracking) -> None:
+    autolog(libraries=["gurobipy"], diagnose_infeasibility=True)
+
+    _linear_program().optimize()
+
+    run: Run = _recorded_run(tracking)
+    assert run.data.tags["optimization.termination"] == "optimal"
+    assert "optimization.diagnostics.infeasibility" not in run.data.tags
