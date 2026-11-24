@@ -2,11 +2,12 @@
 
 import dataclasses
 import math
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import timedelta
 from enum import Enum
 from functools import wraps
 from inspect import Signature, signature
+from pathlib import Path
 from types import ModuleType
 from typing import cast
 
@@ -18,11 +19,16 @@ from ortools.math_opt.python.objectives import Objective
 from ortools.math_opt.python.parameters import SolveParameters, SolverType
 from ortools.math_opt.python.result import SolveResult
 
+from mlflow_optimization.common.diagnostics import warn
 from mlflow_optimization.common.patching import (
     Patch,
     rebind_module_names,
     receiver_of,
     restore_module_names,
+)
+from mlflow_optimization.features.artifacts.types import (
+    ArtifactRequest,
+    ArtifactWorkspace,
 )
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
 from mlflow_optimization.features.autolog.types import SolveObservation
@@ -131,34 +137,66 @@ class MathOptAdapter:
             call_signature: Signature = signature(original_solve)
             call_signature.bind(*args, **kwargs)
 
+            artifact_requests: list[ArtifactRequest] = []
+            artifact_diagnostics: dict[str, str] = {}
+
             def call(hook: ProgressHook | None) -> SolveResult:
-                if hook is None:
-                    return original_solve(*args, **kwargs)
-                progress_call: tuple[tuple[object, ...], dict[str, object]] | None = (
-                    None
+                call_arguments: tuple[object, ...] = args
+                call_keywords: dict[str, object] = dict(kwargs)
+                if hook is not None:
+                    try:
+                        progress_call: (
+                            tuple[tuple[object, ...], dict[str, object]] | None
+                        ) = self._progress_call(
+                            hook,
+                            entry_point,
+                            args,
+                            kwargs,
+                            receiver,
+                        )
+                    except Exception:  # noqa: BLE001
+                        # NOTE: Composition failures fall back to the unchanged solve call.
+                        progress_call = None
+                    if progress_call is not None:
+                        call_arguments, call_keywords = progress_call
+                workspace: ArtifactWorkspace | None = (
+                    active_observer.artifact_workspace()
                 )
-                try:
-                    progress_call = self._progress_call(
-                        hook,
-                        entry_point,
-                        args,
-                        kwargs,
-                        receiver,
+                if workspace is None:
+                    return original_solve(*call_arguments, **call_keywords)
+                collected_lines: list[str] = []
+                if workspace.options.solver_model:
+                    self._export_model(
+                        workspace,
+                        self._model(entry_point, args, kwargs, receiver),
+                        artifact_requests,
+                        artifact_diagnostics,
                     )
-                except Exception:  # noqa: BLE001
-                    # NOTE: Composition failures fall back to the unchanged solve call.
-                    progress_call = None
-                if progress_call is None:
-                    return original_solve(*args, **kwargs)
-                progress_arguments: tuple[object, ...] = progress_call[0]
-                progress_keywords: dict[str, object] = progress_call[1]
-                return original_solve(*progress_arguments, **progress_keywords)
+                if workspace.options.solver_log:
+                    user_message_callback: object = call_keywords.get("msg_cb")
+
+                    def collecting_message_callback(lines: Sequence[str]) -> None:
+                        collected_lines.extend(lines)
+                        if callable(user_message_callback):
+                            user_message_callback(lines)
+
+                    call_keywords["msg_cb"] = collecting_message_callback
+                try:
+                    return original_solve(*call_arguments, **call_keywords)
+                finally:
+                    if workspace.options.solver_log:
+                        self._attach_log(
+                            workspace,
+                            collected_lines,
+                            artifact_requests,
+                            artifact_diagnostics,
+                        )
 
             def extract(
                 result: SolveResult | None,
                 error: BaseException | None,
             ) -> SolveObservation:
-                return self._extract(
+                observation: SolveObservation = self._extract(
                     result,
                     error,
                     entry_point,
@@ -166,10 +204,66 @@ class MathOptAdapter:
                     cast(dict[str, object], kwargs),
                     receiver,
                 )
+                workspace: ArtifactWorkspace | None = (
+                    active_observer.artifact_workspace()
+                )
+                if workspace is not None:
+                    if (
+                        workspace.options.diagnose_infeasibility
+                        and observation.outcome.termination is Termination.INFEASIBLE
+                    ):
+                        artifact_diagnostics[
+                            "optimization.diagnostics.infeasibility"
+                        ] = "unsupported"
+                    return dataclasses.replace(
+                        observation,
+                        artifacts=tuple(artifact_requests),
+                        diagnostics=dict(artifact_diagnostics),
+                    )
+                return observation
 
             return active_observer.observe(self.api, call, extract)
 
         return wrapped_solve
+
+    def _export_model(
+        self,
+        workspace: ArtifactWorkspace,
+        model: Model | None,
+        requests: list[ArtifactRequest],
+        diagnostics: dict[str, str],
+    ) -> None:
+        """The exported MathOpt model proto attached to a solve."""
+        tag: str = "optimization.artifacts.solver_model"
+        try:
+            if model is None:
+                diagnostics[tag] = "unsupported"
+                return
+            path: Path = workspace.directory / "model.pb"
+            path.write_bytes(model.export_model().SerializeToString())
+            requests.append(ArtifactRequest(str(path), "model"))
+            diagnostics[tag] = "true"
+        except Exception as error:  # noqa: BLE001
+            diagnostics[tag] = "failed"
+            warn(f"MathOpt model export failed: {error}")
+
+    def _attach_log(
+        self,
+        workspace: ArtifactWorkspace,
+        lines: list[str],
+        requests: list[ArtifactRequest],
+        diagnostics: dict[str, str],
+    ) -> None:
+        """The collected MathOpt solver messages attached to a solve."""
+        tag: str = "optimization.artifacts.solver_log"
+        try:
+            path: Path = workspace.directory / "log.txt"
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            requests.append(ArtifactRequest(str(path), "solver"))
+            diagnostics[tag] = "true"
+        except Exception as error:  # noqa: BLE001
+            diagnostics[tag] = "failed"
+            warn(f"MathOpt solver log could not be attached: {error}")
 
     def _progress_call(
         self,
@@ -377,7 +471,11 @@ class MathOptAdapter:
         limit_name: str | None = self._enum_name(limit)
         raw_status: str = self._raw_status(reason, limit, reason_name, limit_name)
         termination: Termination = self._termination(reason_name, limit_name)
-        has_solution: bool | None = self._has_solution(result)
+        has_solution: bool | None = (
+            False
+            if termination is Termination.UNBOUNDED
+            else self._has_solution(result)
+        )
         return ReportedOutcome(raw_status, termination, has_solution)
 
     def _has_solution(self, result: SolveResult) -> bool | None:
@@ -520,6 +618,10 @@ class MathOptAdapter:
         has_solution: bool | None,
     ) -> float | MissingReason:
         """The best primal feasible objective value in a MathOpt result."""
+        termination: object = self._guarded_attribute(result, "termination")
+        reason: object = self._guarded_attribute(termination, "reason")
+        if self._enum_name(reason) == "UNBOUNDED":
+            return MissingReason.UNBOUNDED
         if has_solution is False:
             return MissingReason.NO_SOLUTION
         try:
