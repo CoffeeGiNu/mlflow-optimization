@@ -595,3 +595,48 @@ def test_log_artifacts_false_disables_artifact_and_diagnostic_options(
         for tag in run.data.tags
         if tag.startswith(("optimization.artifacts.", "optimization.diagnostics."))
     ]
+
+
+def test_appsi_highs_infeasible_lp_attaches_iis_naming_conflicting_constraints(
+    tracking: Any,
+) -> None:
+    autolog(libraries=["pyomo"], diagnose_infeasibility=True)
+    solver: Any = _solver_or_skip("appsi_highs")
+    model: Any = ConcreteModel()
+    model.value = Var(bounds=(0, 10))
+    model.other = Var(bounds=(0, 10))
+    model.conflict_lower = Constraint(expr=cast(Any, model.value) >= 5)
+    model.conflict_upper = Constraint(expr=cast(Any, model.value) <= 3)
+    model.irrelevant = Constraint(expr=cast(Any, model.other) >= 1)
+    model.objective = Objective(expr=model.value + model.other, sense=minimize)
+
+    solver.solve(model, load_solutions=False)
+
+    run: Run = _single_solve_run(tracking)
+    paths: set[str] = _artifact_paths(tracking, run)
+    assert run.data.tags["optimization.diagnostics.infeasibility"] == "iis"
+    assert "diagnostics/iis.lp" in paths
+    assert "diagnostics/iis.ilp" not in paths
+    iis_text: str = _artifact_text(tracking, run, "diagnostics/iis.lp")
+    assert "conflict_lower" in iis_text
+    assert "conflict_upper" in iis_text
+    assert "irrelevant" not in iis_text
+
+
+def test_appsi_highs_infeasible_mip_does_not_attach_iis(tracking: Any) -> None:
+    autolog(libraries=["pyomo"], diagnose_infeasibility=True)
+    solver: Any = _solver_or_skip("appsi_highs")
+    model: Any = ConcreteModel()
+    model.value = Var(domain=Binary)
+    model.conflict = Constraint(expr=cast(Any, model.value) >= 2)
+    model.objective = Objective(expr=model.value, sense=minimize)
+
+    solver.solve(model, load_solutions=False)
+
+    run: Run = _single_solve_run(tracking)
+    assert run.data.tags["optimization.diagnostics.infeasibility"] == "unsupported"
+    assert not [
+        path
+        for path in _artifact_paths(tracking, run)
+        if path.startswith("diagnostics/")
+    ]

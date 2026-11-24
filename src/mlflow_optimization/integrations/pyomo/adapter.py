@@ -400,6 +400,7 @@ class PyomoAdapter:
 
     def _diagnose_infeasibility(
         self,
+        solver: Any,
         model: Any | None,
         termination: Termination,
         directory: Path,
@@ -413,26 +414,64 @@ class PyomoAdapter:
         if termination is not Termination.INFEASIBLE:
             return
         try:
-            iis_module: Any = importlib.import_module("pyomo.contrib.iis")
-            factory: Any = importlib.import_module("pyomo.environ").SolverFactory
-            iis_solver: str | None = next(
-                (
-                    name
-                    for name in ("gurobi", "cplex", "xpress")
-                    if factory(f"{name}_persistent").available(exception_flag=False)
-                ),
-                None,
-            )
-            if model is None or iis_solver is None:
-                diagnostics[tag] = "unsupported"
-                return
-            iis_path: Path = directory / "iis.ilp"
-            iis_module.write_iis(model, str(iis_path), solver=iis_solver)
+            iis_path: Path | None = self._write_iis(solver, model, directory)
         except Exception as iis_error:  # noqa: BLE001
             self._mark_failed(tag, iis_error, diagnostics)
             return
+        if iis_path is None:
+            diagnostics[tag] = "unsupported"
+            return
         artifacts.append(ArtifactRequest(str(iis_path), "diagnostics"))
         diagnostics[tag] = "iis"
+
+    def _write_iis(
+        self, solver: Any, model: Any | None, directory: Path
+    ) -> Path | None:
+        owner_modules: str = " ".join(
+            owner.__module__ for owner in type(solver).__mro__
+        )
+        for solver_name in ("gurobi", "cplex", "xpress"):
+            if solver_name in owner_modules and model is not None:
+                iis_module: Any = importlib.import_module("pyomo.contrib.iis")
+                iis_path: Path = directory / "iis.ilp"
+                iis_module.write_iis(model, str(iis_path), solver=solver_name)
+                return iis_path
+        if self._engine(solver) != "highs":
+            return None
+        highspy_module: Any = importlib.import_module("highspy")
+        native_solver: Any = self._read(solver, "_solver_model")[0]
+        problem: Any = native_solver.getLp()
+        if any(
+            variable_type != highspy_module.HighsVarType.kContinuous
+            for variable_type in problem.integrality_
+        ):
+            return None
+        # NOTE: A fresh instance keeps the user's HiGHS instance untouched.
+        isolated: Any = highspy_module.Highs()
+        isolated.setOptionValue("output_flag", False)
+        isolated.setOptionValue("iis_strategy", 6)
+        # NOTE: Pyomo does not name the HiGHS rows and columns; label them for readable IIS output.
+        row_names: list[str] = [f"r{index}" for index in range(problem.num_row_)]
+        column_names: list[str] = [f"c{index}" for index in range(problem.num_col_)]
+        for constraint, row_index in solver._pyomo_con_to_solver_con_map.items():
+            row_names[row_index] = constraint.name
+        if model is not None:
+            variable_type: Any = importlib.import_module("pyomo.core.base.var").Var
+            for variable in model.component_data_objects(variable_type):
+                column_index: int | None = solver._pyomo_var_to_solver_var_map.get(
+                    id(variable)
+                )
+                if column_index is not None:
+                    column_names[column_index] = variable.name
+        problem.row_names_ = row_names
+        problem.col_names_ = column_names
+        isolated.passModel(problem)
+        iis: Any = isolated.getIis()[1]
+        if not iis.valid_ or (len(iis.row_index_) == 0 and len(iis.col_index_) == 0):
+            return None
+        iis_path = directory / "iis.lp"
+        isolated.writeIisModel(str(iis_path))
+        return iis_path if iis_path.exists() else None
 
     def _solve_overrides(self, owner: type[Any]) -> list[type[Any]]:
         overrides: list[type[Any]] = []
@@ -513,6 +552,7 @@ class PyomoAdapter:
             collected_diagnostics: dict[str, str] = dict(diagnostics or {})
             if workspace is not None and workspace.options.diagnose_infeasibility:
                 self._diagnose_infeasibility(
+                    solver,
                     model,
                     outcome.termination,
                     workspace.directory,
