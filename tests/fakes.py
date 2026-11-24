@@ -1,8 +1,13 @@
 """A fake solver API for adapter tests."""
 
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 from mlflow_optimization.common.patching import Patch
+from mlflow_optimization.features.artifacts.types import (
+    ArtifactRequest,
+    ArtifactWorkspace,
+)
 from mlflow_optimization.features.autolog.ports import SolveObserver
 from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.metadata.types import (
@@ -34,6 +39,9 @@ class FakeSolver:
         raises: BaseException | None = None,
         during_solve: Callable[[], None] | None = None,
         progress_samples: Sequence[tuple[float | None, float | None]] = (),
+        artifact_text: str | None = None,
+        artifact_directory: str = "solver",
+        diagnostics: dict[str, str] | None = None,
     ) -> None:
         self.status: str | Termination = status
         self.has_solution: bool = has_solution
@@ -51,6 +59,13 @@ class FakeSolver:
         self.progress_samples: tuple[tuple[float | None, float | None], ...] = tuple(
             progress_samples
         )
+        self.artifact_text: str | None = artifact_text
+        self.artifact_directory: str = artifact_directory
+        self.diagnostics: dict[str, str] = (
+            diagnostics.copy() if diagnostics is not None else {}
+        )
+        self.seen_workspace: ArtifactWorkspace | None = None
+        self.written_path: Path | None = None
 
     def solve(self, hook: ProgressHook | None = None) -> str:
         """The configured solver termination status."""
@@ -84,6 +99,16 @@ class FakeSolverAdapter:
         ) -> Callable[[FakeSolver], str]:
             def observed(solver: FakeSolver) -> str:
                 def call(hook: ProgressHook | None) -> str:
+                    workspace: ArtifactWorkspace | None = (
+                        self._observer.artifact_workspace()
+                        if self._observer is not None
+                        else None
+                    )
+                    solver.seen_workspace = workspace
+                    if workspace is not None and solver.artifact_text is not None:
+                        written_path: Path = workspace.directory / "fake.log"
+                        written_path.write_text(solver.artifact_text, encoding="utf-8")
+                        solver.written_path = written_path
                     return original(solver, hook)
 
                 def extract(
@@ -125,11 +150,23 @@ class FakeSolverAdapter:
                         solver="fake",
                         parameters=parameters,
                     )
+                    artifacts: tuple[ArtifactRequest, ...] = (
+                        (
+                            ArtifactRequest(
+                                local_path=str(solver.written_path),
+                                artifact_directory=solver.artifact_directory,
+                            ),
+                        )
+                        if solver.written_path is not None
+                        else ()
+                    )
                     return SolveObservation(
                         api=self.api,
                         outcome=outcome,
                         metrics=metrics,
                         metadata=metadata,
+                        artifacts=artifacts,
+                        diagnostics=solver.diagnostics,
                     )
 
                 if self._observer is None:

@@ -4,12 +4,19 @@ from collections.abc import Callable, Iterator, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import replace
 from itertools import count
+from pathlib import Path
+from shutil import rmtree
+from tempfile import mkdtemp
 from threading import Lock
 from time import perf_counter, time
 from typing import cast
 from uuid import uuid4
 
 from mlflow_optimization.common.diagnostics import warn
+from mlflow_optimization.features.artifacts.types import (
+    ArtifactOptions,
+    ArtifactWorkspace,
+)
 from mlflow_optimization.features.progress.types import ProgressHook, SampleSink
 
 from .ports import SolverIntegration, SolveSink
@@ -28,6 +35,9 @@ class _SolveScope:
 
 _observing: ContextVar[_SolveScope | None] = ContextVar(
     "autolog_observing", default=None
+)
+_workspace: ContextVar[ArtifactWorkspace | None] = ContextVar(
+    "autolog_artifact_workspace", default=None
 )
 
 
@@ -58,6 +68,10 @@ class AutologManager:
             integration.uninstall()
             self._integrations.remove(integration)
 
+    def artifact_workspace(self) -> ArtifactWorkspace | None:
+        """The workspace of the outermost solve observed in this context."""
+        return _workspace.get()
+
     def observe[T](
         self,
         api: str,
@@ -67,10 +81,30 @@ class AutologManager:
         """The result of ``call(hook)``, observed as one solve unless nested or disabled."""
         parent: _SolveScope | None = _observing.get()
         if not self._enabled or (parent is not None and parent.active):
-            return call(None)
+            nested_token: Token[ArtifactWorkspace | None] = _workspace.set(None)
+            try:
+                return call(None)
+            finally:
+                _workspace.reset(nested_token)
         scope: _SolveScope = _SolveScope()
         token: Token[_SolveScope | None] = _observing.set(scope)
+        workspace_token: Token[ArtifactWorkspace | None] | None = None
+        workspace_directory: str | None = None
         try:
+            options: ArtifactOptions | None = None
+            try:
+                options = self._sink.artifact_options()
+                if options != ArtifactOptions():
+                    workspace_directory = mkdtemp(prefix="mlflow-optimization-")
+                    workspace_token = _workspace.set(
+                        ArtifactWorkspace(Path(workspace_directory), options)
+                    )
+            # NOTE: A defect in the workspace must never change the result of the user's solve.
+            except Exception as exception:  # noqa: BLE001
+                warn(
+                    f"Artifact workspace failed for {api}: "
+                    f"{type(exception).__name__}: {exception}"
+                )
             failures: list[str] = []
 
             def guard(step: str, operation: Callable[[], object]) -> object:
@@ -164,3 +198,7 @@ class AutologManager:
         finally:
             scope.active = False
             _observing.reset(token)
+            if workspace_token is not None:
+                _workspace.reset(workspace_token)
+            if workspace_directory is not None:
+                rmtree(workspace_directory, ignore_errors=True)

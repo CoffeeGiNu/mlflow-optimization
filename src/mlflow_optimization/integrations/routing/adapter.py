@@ -9,6 +9,7 @@ import ortools
 from ortools.constraint_solver import pywrapcp
 
 from mlflow_optimization.common.patching import Patch, receiver_of
+from mlflow_optimization.features.artifacts.types import ArtifactWorkspace
 from mlflow_optimization.features.autolog.ports import (
     ObservationError,
     SolveObserver,
@@ -199,6 +200,7 @@ class RoutingAdapter(SolverIntegration):
                         error,
                         search_parameters,
                         counter_snapshot,
+                        call_observer.artifact_workspace(),
                     )
 
                 return call_observer.observe(self.api, call, extract)
@@ -247,6 +249,7 @@ class RoutingAdapter(SolverIntegration):
         error: BaseException | None,
         search_parameters: Any | None,
         counter_snapshot: tuple[float | None, float | None],
+        workspace: ArtifactWorkspace | None,
     ) -> SolveObservation:
         """The plain observation values reported by one Routing solve."""
         try:
@@ -256,6 +259,7 @@ class RoutingAdapter(SolverIntegration):
                 error,
                 search_parameters,
                 counter_snapshot,
+                workspace,
             )
         except ObservationError:
             raise
@@ -271,6 +275,7 @@ class RoutingAdapter(SolverIntegration):
         error: BaseException | None,
         search_parameters: Any | None,
         counter_snapshot: tuple[float | None, float | None],
+        workspace: ArtifactWorkspace | None,
     ) -> SolveObservation:
         """The Routing solve observation."""
         status_code: int | None = None
@@ -333,6 +338,17 @@ class RoutingAdapter(SolverIntegration):
             api_version = str(ortools.__version__)
         except _SDK_EXCEPTION:
             api_version = None
+        diagnostics: dict[str, str] = {}
+        if workspace is not None:
+            if workspace.options.solver_log:
+                diagnostics["optimization.artifacts.solver_log"] = "unsupported"
+            if workspace.options.solver_model:
+                diagnostics["optimization.artifacts.solver_model"] = "unsupported"
+            if (
+                workspace.options.diagnose_infeasibility
+                and termination is Termination.INFEASIBLE
+            ):
+                diagnostics["optimization.diagnostics.infeasibility"] = "unsupported"
         observation: SolveObservation = SolveObservation(
             api=self.api,
             outcome=ReportedOutcome(
@@ -349,6 +365,7 @@ class RoutingAdapter(SolverIntegration):
                 parameters=parameters,
                 wall_time_includes_problem_build=False,
             ),
+            diagnostics=diagnostics,
         )
         return observation
 

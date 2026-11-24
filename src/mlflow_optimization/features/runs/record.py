@@ -17,6 +17,7 @@ from mlflow_optimization.features.artifacts.ports import (
     ArtifactStore,
     ArtifactStoreError,
 )
+from mlflow_optimization.features.artifacts.types import ArtifactOptions
 from mlflow_optimization.features.autolog.types import CompletedSolve, SolveObservation
 from mlflow_optimization.features.metadata.collect import collect_metadata
 from mlflow_optimization.features.metadata.types import CollectedMetadata
@@ -231,6 +232,7 @@ class RecordSolve:
                 warn(f"Could not record solve: {error}")
                 return
             _last_solve.set(SolveRun(run, self._runs, self._artifacts, self.options))
+            self._attach_artifacts(run, solve.observation)
             return
         tags: dict[str, str] = _identity_tags(
             solve.api, solve.solve_id, solve.solve_index
@@ -264,6 +266,31 @@ class RecordSolve:
                 _last_solve.set(
                     SolveRun(run, self._runs, self._artifacts, self.options)
                 )
+                self._attach_artifacts(run, solve.observation)
+
+    def artifact_options(self) -> ArtifactOptions:
+        """The automatic artifacts requested for the next solve."""
+        if not self.options.log_artifacts:
+            return ArtifactOptions()
+        return ArtifactOptions(
+            solver_log=self.options.log_solver_log,
+            solver_model=self.options.log_solver_model,
+            diagnose_infeasibility=self.options.diagnose_infeasibility,
+        )
+
+    def _attach_artifacts(
+        self, run: RunReference, observation: SolveObservation | None
+    ) -> None:
+        """Attach the files an observation requested."""
+        if observation is None:
+            return
+        for request in observation.artifacts:
+            try:
+                self._artifacts.log_artifact(
+                    run.run_id, request.local_path, request.artifact_directory
+                )
+            except ArtifactStoreError as error:
+                warn(f"Could not log artifact: {error}")
 
     def _build_record(
         self, solve: CompletedSolve, context: _RecordingContext, status: RunStatus
@@ -294,6 +321,8 @@ class RecordSolve:
         tags.update(outcome_tags(outcome))
         tags.update(metrics.tags)
         tags.update(metadata.tags)
+        if observation is not None:
+            tags.update(observation.diagnostics)
         tags.update(_identity_tags(solve.api, solve.solve_id, solve.solve_index))
         if solve.error is not None:
             tags["optimization.error"] = type(solve.error).__name__

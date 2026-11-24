@@ -18,6 +18,9 @@ def autolog(
     log_solver_metrics: bool = True,
     log_artifacts: bool = True,
     log_progress: bool = True,
+    log_solver_log: bool = False,
+    log_solver_model: bool = False,
+    diagnose_infeasibility: bool = False,
 ) -> None:
     """Configure automatic logging of optimization solves.
 
@@ -36,6 +39,13 @@ def autolog(
         Whether files attached through ``SolveRun.log_artifact`` are logged.
     log_progress : bool, default True
         Whether incumbent, bound and gaps are logged as metric history while a solve runs.
+    log_solver_log : bool, default False
+        Whether the solver log is attached to the run; requires ``log_artifacts``.
+    log_solver_model : bool, default False
+        Whether the model is attached to the run just before solving; requires ``log_artifacts``.
+    diagnose_infeasibility : bool, default False
+        Whether an IIS or core is attached when a solve is infeasible; requires
+        ``log_artifacts``. An IIS may require an additional solve.
 
     Raises
     ------
@@ -51,4 +61,7 @@ def autolog(
         log_solver_metrics=log_solver_metrics,
         log_artifacts=log_artifacts,
         log_progress=log_progress,
+        log_solver_log=log_solver_log,
+        log_solver_model=log_solver_model,
+        diagnose_infeasibility=diagnose_infeasibility,
     )
