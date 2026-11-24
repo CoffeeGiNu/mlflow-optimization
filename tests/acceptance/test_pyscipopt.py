@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Any
 
 import pytest
 from conftest import Tracking
-from mlflow.entities import Run
+from mlflow.entities import FileInfo, Run
 from pyscipopt import (
     SCIP_PARAMSETTING,  # pyright: ignore[reportPrivateImportUsage] -- Runtime re-export used by the tests.
     Model,  # pyright: ignore[reportAssignmentType] -- The test rebinds this export.
@@ -34,6 +35,51 @@ def _assert_missing_reason(run: Run, metric_name: str, reason: str) -> None:
     """An absent metric and its recorded reason."""
     assert metric_name not in run.data.metrics
     assert run.data.tags[f"optimization.missing.{metric_name}"] == reason
+
+
+def _artifact_paths(
+    tracking: Tracking, run: Run, directory: str | None = None
+) -> set[str]:
+    """Every file path attached to a run, found recursively."""
+    paths: set[str] = set()
+    for info in tracking.client.list_artifacts(run.info.run_id, directory):
+        file_info: FileInfo = info
+        if file_info.is_dir:
+            paths |= _artifact_paths(tracking, run, file_info.path)
+        else:
+            paths.add(file_info.path)
+    return paths
+
+
+def _download(
+    tracking: Tracking, run: Run, artifact_path: str, directory: Path
+) -> Path:
+    """A local copy of one artifact of a run."""
+    return Path(
+        tracking.client.download_artifacts(
+            run.info.run_id, artifact_path, str(directory)
+        )
+    )
+
+
+def _knapsack_model() -> Model:
+    """A small integer program whose optimal objective is 11."""
+    model: Model = Model()
+    first: Any = model.addVar("first", vtype="I", ub=3)
+    second: Any = model.addVar("second", vtype="I", ub=10)
+    model.addCons(first + second <= 4)
+    model.setObjective(3 * first + 2 * second, "maximize")
+    return model
+
+
+def _infeasible_model() -> Model:
+    """A binary model with contradictory constraints."""
+    model: Model = Model()
+    variable: Any = model.addVar("decision", vtype="B")
+    model.setObjective(variable, "maximize")
+    model.addCons(variable <= 0, name="upper")
+    model.addCons(variable >= 1, name="lower")
+    return model
 
 
 def test_optimal_mip_records_solution_metrics_and_engine(tracking: Tracking) -> None:
@@ -85,9 +131,10 @@ def test_unbounded_model_records_unbounded_termination(tracking: Tracking) -> No
 
     model.optimize()
 
-    run: Run = _single_solve_run(tracking, "unbounded", True)
+    run: Run = _single_solve_run(tracking, "unbounded", False)
     assert run.data.tags["optimization.has_objective"] == "true"
-    assert "objective_value" in run.data.metrics
+    _assert_missing_reason(run, "objective_value", "unbounded")
+    assert "pyscipopt.gap" not in run.data.metrics
 
 
 def test_time_limit_without_solution_records_missing_objective(
@@ -288,3 +335,125 @@ def test_disable_preserves_a_user_model_subclass_binding(tracking: Tracking) -> 
     finally:
         autolog(disable=True)
         Model = original_model
+
+
+def test_infeasible_model_attaches_log_model_and_iis(tracking: Tracking) -> None:
+    autolog(
+        libraries=["pyscipopt"],
+        log_solver_log=True,
+        log_solver_model=True,
+        diagnose_infeasibility=True,
+    )
+    model: Model = _infeasible_model()
+    model.hideOutput()
+
+    model.optimize()
+
+    run: Run = _single_solve_run(tracking, "infeasible", False)
+    assert {"solver/log.txt", "model/model.cip", "diagnostics/iis.cip"} <= (
+        _artifact_paths(tracking, run)
+    )
+    tags: dict[str, str] = run.data.tags
+    assert tags["optimization.artifacts.solver_log"] == "true"
+    assert tags["optimization.artifacts.solver_model"] == "true"
+    assert tags["optimization.diagnostics.infeasibility"] == "iis"
+    assert tags["optimization.diagnostics.iis_minimal"] in ("true", "false")
+
+
+def test_solver_log_artifact_is_not_empty(tracking: Tracking, tmp_path: Path) -> None:
+    autolog(libraries=["pyscipopt"], log_solver_log=True)
+    model: Model = _knapsack_model()
+    model.hideOutput()
+
+    model.optimize()
+
+    run: Run = _single_solve_run(tracking, "optimal", True)
+    log_path: Path = _download(tracking, run, "solver/log.txt", tmp_path)
+    assert log_path.read_text(errors="replace").strip() != ""
+
+
+def test_optimal_solve_records_presolved_problem_size(tracking: Tracking) -> None:
+    autolog(libraries=["pyscipopt"])
+    model: Model = _knapsack_model()
+    model.hideOutput()
+
+    model.optimize()
+
+    run: Run = _single_solve_run(tracking, "optimal", True)
+    assert int(run.data.params["problem.presolved_num_variables"]) >= 0
+    assert int(run.data.params["problem.presolved_num_constraints"]) >= 0
+
+
+def test_attached_model_reloads_and_resolves_to_the_same_optimum(
+    tracking: Tracking, tmp_path: Path
+) -> None:
+    autolog(libraries=["pyscipopt"], log_solver_model=True)
+    model: Model = _knapsack_model()
+    model.hideOutput()
+
+    model.optimize()
+
+    run: Run = _single_solve_run(tracking, "optimal", True)
+    model_path: Path = _download(tracking, run, "model/model.cip", tmp_path)
+    reloaded: Model = Model()
+    reloaded.hideOutput()
+    reloaded.readProblem(str(model_path))
+    reloaded.optimize()
+    assert model.getObjVal() == pytest.approx(11)
+    assert reloaded.getObjVal() == pytest.approx(model.getObjVal())
+
+
+def test_user_logfile_keeps_prior_content_and_receives_the_solve_log(
+    tracking: Tracking, tmp_path: Path
+) -> None:
+    autolog(libraries=["pyscipopt"], log_solver_log=True)
+    logfile: Path = tmp_path / "user.log"
+    logfile.write_text("previous content\n")
+    model: Model = _knapsack_model()
+    model.setLogfile(str(logfile))
+
+    model.optimize()
+    model.setLogfile(None)
+
+    run: Run = _single_solve_run(tracking, "optimal", True)
+    user_text: str = logfile.read_text(errors="replace")
+    assert user_text.startswith("previous content\n")
+    assert len(user_text) > len("previous content\n")
+    assert "solver/log.txt" in _artifact_paths(tracking, run)
+    assert run.data.tags["optimization.artifacts.solver_log"] == "true"
+
+
+def test_hidden_output_stays_silent_while_the_log_is_attached(
+    tracking: Tracking, capfd: pytest.CaptureFixture[str]
+) -> None:
+    autolog(libraries=["pyscipopt"], log_solver_log=True)
+    model: Model = _knapsack_model()
+    model.hideOutput()
+
+    model.optimize()
+
+    run: Run = _single_solve_run(tracking, "optimal", True)
+    assert capfd.readouterr().out == ""
+    assert "solver/log.txt" in _artifact_paths(tracking, run)
+
+
+def test_log_artifacts_off_disables_every_automatic_artifact(
+    tracking: Tracking,
+) -> None:
+    autolog(
+        libraries=["pyscipopt"],
+        log_artifacts=False,
+        log_solver_log=True,
+        log_solver_model=True,
+        diagnose_infeasibility=True,
+    )
+    model: Model = _infeasible_model()
+    model.hideOutput()
+
+    model.optimize()
+
+    run: Run = _single_solve_run(tracking, "infeasible", False)
+    assert _artifact_paths(tracking, run) == set()
+    for tag in run.data.tags:
+        assert not tag.startswith("optimization.artifacts.")
+        assert not tag.startswith("optimization.diagnostics.")

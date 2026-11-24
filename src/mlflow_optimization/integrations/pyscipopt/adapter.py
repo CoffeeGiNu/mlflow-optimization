@@ -2,18 +2,25 @@
 
 import math
 from collections.abc import Callable
+from dataclasses import replace
 from functools import wraps
 from inspect import Signature, signature
+from pathlib import Path
 from types import ModuleType
 from typing import Any
 from weakref import WeakKeyDictionary
 
 import pyscipopt
 import pyscipopt.scip
+from mlflow_optimization.common.diagnostics import warn
 from mlflow_optimization.common.patching import (
     rebind_module_names,
     receiver_of,
     restore_module_names,
+)
+from mlflow_optimization.features.artifacts.types import (
+    ArtifactRequest,
+    ArtifactWorkspace,
 )
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
 from mlflow_optimization.features.autolog.types import SolveObservation
@@ -88,6 +95,9 @@ class _ProgressEventHandler(Eventhdlr):
             return
         try:
             model: Any = self.model
+            # NOTE: Solutions found during presolve can be fake ones of an unbounded model.
+            if int(model.getStage()) <= pyscipopt.scip.PY_SCIP_STAGE.PRESOLVING:
+                return
             solver_infinity: float = float(model.infinity())
             incumbent: float | None = None
             solution_count: int = int(model.getNSols())
@@ -121,6 +131,7 @@ class PyScipOptAdapter:
             Any,
             tuple[int | MissingReason, dict[str, float | MissingReason]],
         ] = WeakKeyDictionary()
+        self._user_logfiles: WeakKeyDictionary[Any, str | None] = WeakKeyDictionary()
 
     def install(self, observer: SolveObserver) -> None:
         """A patch that replaces model references with an observing subclass."""
@@ -136,6 +147,16 @@ class PyScipOptAdapter:
 
         class LoggingModel(original_model):
             """A PySCIPOpt model that observes optimization calls."""
+
+        original_set_logfile: Callable[..., Any] = original_model.setLogfile
+
+        @wraps(original_set_logfile)
+        def remembering_set_logfile(model: Any, path: str | None) -> Any:
+            result: Any = original_set_logfile(model, path)
+            integration._user_logfiles[model] = path
+            return result
+
+        LoggingModel.setLogfile = remembering_set_logfile  # type: ignore[method-assign]
 
         entry_point_names: tuple[str, ...] = (
             "optimize",
@@ -184,6 +205,7 @@ class PyScipOptAdapter:
         self._logging_model = None
         self._rebound_names = []
         self._counter_snapshots.clear()
+        self._user_logfiles.clear()
 
 
 def _wrap_solve_entry_point(
@@ -249,7 +271,27 @@ def _wrap_solve_entry_point(
             default_parameters,
         )
 
+        recorded_artifacts: list[ArtifactRequest] = []
+        recorded_diagnostics: dict[str, str] = {}
+
         def call(progress_hook: ProgressHook | None) -> Any:
+            workspace: ArtifactWorkspace | None = observer.artifact_workspace()
+            if workspace is None:
+                return call_solver(progress_hook)
+            finish_log: Callable[[], None] | None = _begin_artifacts(
+                model,
+                workspace,
+                integration._user_logfiles.get(model),
+                recorded_artifacts,
+                recorded_diagnostics,
+            )
+            try:
+                return call_solver(progress_hook)
+            finally:
+                if finish_log is not None:
+                    finish_log()
+
+        def call_solver(progress_hook: ProgressHook | None) -> Any:
             effective_progress_hook: ProgressHook | None = (
                 progress_hook if records_progress else None
             )
@@ -297,12 +339,30 @@ def _wrap_solve_entry_point(
                         )
                     except Exception:  # noqa: BLE001
                         counter_snapshots.clear()
-                return _extract_observation(
+                observation: SolveObservation = _extract_observation(
                     model,
                     error,
                     parameters_before_solve,
                     counters_before_solve,
                     counters_after_solve,
+                )
+                workspace: ArtifactWorkspace | None = observer.artifact_workspace()
+                if (
+                    workspace is not None
+                    and workspace.options.diagnose_infeasibility
+                    and error is None
+                    and observation.outcome.termination is Termination.INFEASIBLE
+                ):
+                    _diagnose_infeasibility(
+                        model,
+                        workspace,
+                        recorded_artifacts,
+                        recorded_diagnostics,
+                    )
+                return replace(
+                    observation,
+                    artifacts=tuple(recorded_artifacts),
+                    diagnostics=recorded_diagnostics,
                 )
             except Exception as extraction_error:
                 raise ObservationError(
@@ -312,6 +372,76 @@ def _wrap_solve_entry_point(
         return observer.observe(integration.api, call, extract)
 
     return observed_entry_point
+
+
+def _begin_artifacts(
+    model: Any,
+    workspace: ArtifactWorkspace,
+    user_logfile: str | None,
+    artifacts: list[ArtifactRequest],
+    diagnostics: dict[str, str],
+) -> Callable[[], None] | None:
+    """The model artifact written now and the callback that finishes the log artifact."""
+    if workspace.options.solver_model:
+        model_path: Path = workspace.directory / "model.cip"
+        try:
+            model.writeProblem(str(model_path), trans=False, verbose=False)
+            artifacts.append(ArtifactRequest(str(model_path), "model"))
+            diagnostics["optimization.artifacts.solver_model"] = "true"
+        except Exception as error:  # noqa: BLE001
+            diagnostics["optimization.artifacts.solver_model"] = "failed"
+            warn(f"Could not attach the PySCIPOpt model: {error}")
+    if not workspace.options.solver_log:
+        return None
+
+    log_path: Path = workspace.directory / "log.txt"
+    offset: int = 0
+    try:
+        if user_logfile is None:
+            pyscipopt.Model.setLogfile(model, str(log_path))
+        else:
+            offset = Path(user_logfile).stat().st_size
+    except Exception as error:  # noqa: BLE001
+        diagnostics["optimization.artifacts.solver_log"] = "failed"
+        warn(f"Could not attach the PySCIPOpt log: {error}")
+        return None
+
+    def finish_log() -> None:
+        try:
+            if user_logfile is None:
+                pyscipopt.Model.setLogfile(model, None)
+            else:
+                with Path(user_logfile).open("rb") as user_file:
+                    user_file.seek(offset)
+                    log_path.write_bytes(user_file.read())
+            artifacts.append(ArtifactRequest(str(log_path), "solver"))
+            diagnostics["optimization.artifacts.solver_log"] = "true"
+        except Exception as error:  # noqa: BLE001
+            diagnostics["optimization.artifacts.solver_log"] = "failed"
+            warn(f"Could not attach the PySCIPOpt log: {error}")
+
+    return finish_log
+
+
+def _diagnose_infeasibility(
+    model: Any,
+    workspace: ArtifactWorkspace,
+    artifacts: list[ArtifactRequest],
+    diagnostics: dict[str, str],
+) -> None:
+    """The irreducible infeasible subsystem of an infeasible model as an artifact."""
+    iis_path: Path = workspace.directory / "iis.cip"
+    try:
+        iis: Any = model.generateIIS()
+        iis.getSubscip().writeProblem(str(iis_path), trans=False, verbose=False)
+        diagnostics["optimization.diagnostics.iis_minimal"] = (
+            "true" if iis.isSubscipIrreducible() else "false"
+        )
+        artifacts.append(ArtifactRequest(str(iis_path), "diagnostics"))
+        diagnostics["optimization.diagnostics.infeasibility"] = "iis"
+    except Exception as error:  # noqa: BLE001
+        diagnostics["optimization.diagnostics.infeasibility"] = "failed"
+        warn(f"Could not compute the PySCIPOpt IIS: {error}")
 
 
 def _include_progress_handler(model: Any) -> _ProgressEventHandler | None:
@@ -404,6 +534,9 @@ def _extract_observation(
     )
 
     gap: float | MissingReason | None = None
+    if termination is Termination.UNBOUNDED:
+        # NOTE: SCIP reports a fake finite objective for unbounded models.
+        has_solution = False
     if has_objective is False:
         objective_value: float | MissingReason = MissingReason.UNDEFINED
         dual_bound: float | MissingReason = MissingReason.UNDEFINED
@@ -415,7 +548,9 @@ def _extract_observation(
             lambda: float(model.getDualbound()),
             solver_infinity,
         )
-        if has_solution is False:
+        if termination is Termination.UNBOUNDED:
+            objective_value = MissingReason.UNBOUNDED
+        elif has_solution is False:
             objective_value = MissingReason.NO_SOLUTION
         else:
             objective_value = _read_scip_number(
@@ -555,6 +690,17 @@ def _read_metadata(
         lambda: int(model.getNConss(transformed=False)), None
     )
 
+    presolved_variable_count: int | None = _read_value(
+        lambda: int(model.getNVars(transformed=True)), None
+    )
+    presolved_constraint_count: int | None = _read_value(
+        lambda: int(model.getNConss(transformed=True)), None
+    )
+
+    if presolved_variable_count is not None:
+        problem["presolved_num_variables"] = presolved_variable_count
+    if presolved_constraint_count is not None:
+        problem["presolved_num_constraints"] = presolved_constraint_count
     if variable_count is not None:
         problem["num_variables"] = variable_count
     if constraint_count is not None:
