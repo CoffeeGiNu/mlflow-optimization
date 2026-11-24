@@ -356,3 +356,18 @@ def test_disabled_artifact_logging_ignores_diagnostic_flags(
         for tag in run.data.tags
         if tag.startswith(("optimization.artifacts.", "optimization.diagnostics."))
     ]
+
+
+def test_gurobi_infeasibility_diagnosis_attaches_iis(tracking: Tracking) -> None:
+    try:
+        mathopt.solve(_make_infeasible_model(), SolverType.GUROBI)
+    except Exception as error:  # noqa: BLE001
+        pytest.skip(f"MathOpt Gurobi backend is unusable here: {error}")
+    autolog(libraries=["mathopt"], diagnose_infeasibility=True)
+    _solve(_make_infeasible_model(), SolverType.GUROBI)
+
+    run: Run = _single_solve_run(tracking)
+
+    assert run.data.tags["optimization.diagnostics.infeasibility"] == "iis"
+    assert "optimization.diagnostics.iis_minimal" in run.data.tags
+    assert _download(tracking, run, "diagnostics/iis.pb").stat().st_size > 0

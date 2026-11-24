@@ -14,10 +14,13 @@ from typing import cast
 import ortools
 from ortools.math_opt.python import callback, mathopt
 from ortools.math_opt.python import solve as mathopt_solve
+from ortools.math_opt.python.compute_infeasible_subsystem_result import (
+    ComputeInfeasibleSubsystemResult,
+)
 from ortools.math_opt.python.model import Model
 from ortools.math_opt.python.objectives import Objective
 from ortools.math_opt.python.parameters import SolveParameters, SolverType
-from ortools.math_opt.python.result import SolveResult
+from ortools.math_opt.python.result import FeasibilityStatus, SolveResult
 
 from mlflow_optimization.common.diagnostics import warn
 from mlflow_optimization.common.patching import (
@@ -212,9 +215,13 @@ class MathOptAdapter:
                         workspace.options.diagnose_infeasibility
                         and observation.outcome.termination is Termination.INFEASIBLE
                     ):
-                        artifact_diagnostics[
-                            "optimization.diagnostics.infeasibility"
-                        ] = "unsupported"
+                        self._diagnose_infeasibility(
+                            workspace,
+                            self._solver_type(entry_point, args, kwargs, receiver),
+                            self._model(entry_point, args, kwargs, receiver),
+                            artifact_requests,
+                            artifact_diagnostics,
+                        )
                     return dataclasses.replace(
                         observation,
                         artifacts=tuple(artifact_requests),
@@ -246,6 +253,38 @@ class MathOptAdapter:
         except Exception as error:  # noqa: BLE001
             diagnostics[tag] = "failed"
             warn(f"MathOpt model export failed: {error}")
+
+    def _diagnose_infeasibility(
+        self,
+        workspace: ArtifactWorkspace,
+        solver_type: SolverType | None,
+        model: Model | None,
+        requests: list[ArtifactRequest],
+        diagnostics: dict[str, str],
+    ) -> None:
+        """The Gurobi infeasible subsystem attached to a solve."""
+        tag: str = "optimization.diagnostics.infeasibility"
+        if solver_type is not SolverType.GUROBI or model is None:
+            diagnostics[tag] = "unsupported"
+            return
+        try:
+            subsystem: ComputeInfeasibleSubsystemResult = (
+                mathopt.compute_infeasible_subsystem(model, SolverType.GUROBI)
+            )
+            if subsystem.feasibility is not FeasibilityStatus.INFEASIBLE:
+                diagnostics[tag] = "undetermined"
+                return
+            path: Path = workspace.directory / "iis.pb"
+            path.write_bytes(subsystem.to_proto().SerializeToString())
+            requests.append(ArtifactRequest(str(path), "diagnostics"))
+            diagnostics[tag] = "iis"
+            diagnostics["optimization.diagnostics.iis_minimal"] = str(
+                subsystem.is_minimal
+            ).lower()
+        except Exception as error:  # noqa: BLE001
+            # NOTE: ortools may raise AttributeError instead of the solver status error.
+            diagnostics[tag] = "failed"
+            warn(f"MathOpt infeasibility diagnosis failed: {error}")
 
     def _attach_log(
         self,
