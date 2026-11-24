@@ -608,7 +608,9 @@ def test_appsi_highs_infeasible_lp_attaches_iis_naming_conflicting_constraints(
     model.conflict_lower = Constraint(expr=cast(Any, model.value) >= 5)
     model.conflict_upper = Constraint(expr=cast(Any, model.value) <= 3)
     model.irrelevant = Constraint(expr=cast(Any, model.other) >= 1)
-    model.objective = Objective(expr=model.value + model.other, sense=minimize)
+    model.objective = Objective(
+        expr=cast(Any, model.value) + cast(Any, model.other), sense=minimize
+    )
 
     solver.solve(model, load_solutions=False)
 
