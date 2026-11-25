@@ -9,7 +9,7 @@ from functools import wraps
 from inspect import Signature, signature
 from pathlib import Path
 from types import ModuleType
-from typing import cast
+from typing import Any, cast
 
 import ortools
 from ortools.math_opt.python import callback, mathopt
@@ -1044,108 +1044,32 @@ class MathOptAdapter:
         if suppress_strings and isinstance(parameter_value, str):
             return
         if isinstance(parameter_value, Mapping):
-            default_mapping: Mapping[object, object] = (
-                default_value if isinstance(default_value, Mapping) else {}
+            self._append_mapping_parameters(
+                parameter_name,
+                parameter_value,
+                default_value,
+                parameters,
+                suppress_strings,
             )
-            mapping_items: tuple[tuple[object, object], ...]
-            try:
-                mapping_items = tuple(parameter_value.items())
-            except _SDK_EXCEPTION:
-                return
-            for mapping_name, nested_value in mapping_items:
-                if not isinstance(mapping_name, str):
-                    continue
-                try:
-                    nested_default: object = default_mapping.get(
-                        mapping_name,
-                        _UNAVAILABLE,
-                    )
-                except _SDK_EXCEPTION:
-                    nested_default = _UNAVAILABLE
-                self._append_parameters(
-                    f"{parameter_name}.{mapping_name}",
-                    nested_value,
-                    nested_default,
-                    parameters,
-                    suppress_strings,
-                )
             return
         if dataclasses.is_dataclass(parameter_value) and not isinstance(
             parameter_value, type
         ):
-            default_object: object = default_value
-            try:
-                nested_fields: tuple[object, ...] = tuple(
-                    dataclasses.fields(parameter_value)
-                )
-            except _SDK_EXCEPTION:
-                return
-            for parameter_field in nested_fields:
-                nested_name: str = cast(str, parameter_field.name)
-                nested_value: object = self._guarded_attribute(
-                    parameter_value, nested_name
-                )
-                field_default: object = self._guarded_attribute(
-                    default_object, nested_name
-                )
-                self._append_parameters(
-                    f"{parameter_name}.{nested_name}",
-                    nested_value,
-                    field_default,
-                    parameters,
-                    suppress_strings,
-                )
+            self._append_dataclass_parameters(
+                parameter_name,
+                parameter_value,
+                default_value,
+                parameters,
+                suppress_strings,
+            )
             return
         if self._is_message(parameter_value):
-            list_fields_method: object = self._guarded_attribute(
-                parameter_value, "ListFields"
+            self._append_message_parameters(
+                parameter_name,
+                parameter_value,
+                parameters,
+                suppress_strings,
             )
-            if not callable(list_fields_method):
-                return
-            try:
-                fields: object = list_fields_method()
-            except _SDK_EXCEPTION:
-                return
-            if not isinstance(fields, list):
-                return
-            for field_descriptor, field_value in fields:
-                field_name: object = self._guarded_attribute(field_descriptor, "name")
-                enum_descriptor: object = self._guarded_attribute(
-                    field_descriptor, "enum_type"
-                )
-                if not isinstance(field_name, str):
-                    continue
-                if enum_descriptor is not None and enum_descriptor is not _UNAVAILABLE:
-                    enum_values: object = self._guarded_attribute(
-                        enum_descriptor,
-                        "values_by_number",
-                    )
-                    if not isinstance(enum_values, Mapping):
-                        continue
-                    enum_value: object = _UNAVAILABLE
-                    try:
-                        enum_value = enum_values[field_value]
-                    except _SDK_EXCEPTION:
-                        pass
-                    if enum_value is _UNAVAILABLE:
-                        continue
-                    enum_name: object = self._guarded_attribute(enum_value, "name")
-                    if isinstance(enum_name, str):
-                        parameters.append(
-                            SolverParameter(
-                                f"{parameter_name}.{field_name}",
-                                enum_name,
-                                ParameterOrigin.EXPLICIT,
-                            )
-                        )
-                else:
-                    self._append_parameters(
-                        f"{parameter_name}.{field_name}",
-                        field_value,
-                        _UNAVAILABLE,
-                        parameters,
-                        suppress_strings,
-                    )
             return
         scalar: ParameterValue | None = self._parameter_value(parameter_value)
         if scalar is not None:
@@ -1162,6 +1086,134 @@ class MathOptAdapter:
         parameters.append(
             SolverParameter(parameter_name, serialized_value, ParameterOrigin.EXPLICIT)
         )
+
+    def _append_mapping_parameters(
+        self,
+        parameter_name: str,
+        parameter_value: Mapping[object, object],
+        default_value: object,
+        parameters: list[SolverParameter],
+        suppress_strings: bool,
+    ) -> None:
+        """The differing entries of a nested MathOpt parameter mapping."""
+        default_mapping: Mapping[object, object] = (
+            default_value if isinstance(default_value, Mapping) else {}
+        )
+        mapping_items: tuple[tuple[object, object], ...]
+        try:
+            mapping_items = tuple(parameter_value.items())
+        except _SDK_EXCEPTION:
+            return
+        for mapping_name, nested_value in mapping_items:
+            if not isinstance(mapping_name, str):
+                continue
+            try:
+                nested_default: object = default_mapping.get(
+                    mapping_name,
+                    _UNAVAILABLE,
+                )
+            except _SDK_EXCEPTION:
+                nested_default = _UNAVAILABLE
+            self._append_parameters(
+                f"{parameter_name}.{mapping_name}",
+                nested_value,
+                nested_default,
+                parameters,
+                suppress_strings,
+            )
+
+    def _append_dataclass_parameters(
+        self,
+        parameter_name: str,
+        parameter_value: object,
+        default_value: object,
+        parameters: list[SolverParameter],
+        suppress_strings: bool,
+    ) -> None:
+        """The differing fields of a nested MathOpt parameter dataclass."""
+        nested_fields: tuple[object, ...]
+        try:
+            nested_fields = tuple(dataclasses.fields(cast(Any, parameter_value)))
+        except _SDK_EXCEPTION:
+            return
+        for parameter_field in nested_fields:
+            nested_name: str = cast(str, parameter_field.name)
+            nested_value: object = self._guarded_attribute(parameter_value, nested_name)
+            field_default: object = self._guarded_attribute(default_value, nested_name)
+            self._append_parameters(
+                f"{parameter_name}.{nested_name}",
+                nested_value,
+                field_default,
+                parameters,
+                suppress_strings,
+            )
+
+    def _append_message_parameters(
+        self,
+        parameter_name: str,
+        parameter_value: object,
+        parameters: list[SolverParameter],
+        suppress_strings: bool,
+    ) -> None:
+        """The set fields of a nested MathOpt parameter protobuf message."""
+        list_fields_method: object = self._guarded_attribute(
+            parameter_value, "ListFields"
+        )
+        if not callable(list_fields_method):
+            return
+        try:
+            fields: object = list_fields_method()
+        except _SDK_EXCEPTION:
+            return
+        if not isinstance(fields, list):
+            return
+        for field_descriptor, field_value in fields:
+            field_name: object = self._guarded_attribute(field_descriptor, "name")
+            enum_descriptor: object = self._guarded_attribute(
+                field_descriptor, "enum_type"
+            )
+            if not isinstance(field_name, str):
+                continue
+            if enum_descriptor is not None and enum_descriptor is not _UNAVAILABLE:
+                enum_name: str | None = self._enum_value_name(
+                    enum_descriptor, field_value
+                )
+                if enum_name is not None:
+                    parameters.append(
+                        SolverParameter(
+                            f"{parameter_name}.{field_name}",
+                            enum_name,
+                            ParameterOrigin.EXPLICIT,
+                        )
+                    )
+            else:
+                self._append_parameters(
+                    f"{parameter_name}.{field_name}",
+                    field_value,
+                    _UNAVAILABLE,
+                    parameters,
+                    suppress_strings,
+                )
+
+    def _enum_value_name(
+        self, enum_descriptor: object, field_value: object
+    ) -> str | None:
+        """The name of a protobuf enum value."""
+        enum_values: object = self._guarded_attribute(
+            enum_descriptor,
+            "values_by_number",
+        )
+        if not isinstance(enum_values, Mapping):
+            return None
+        enum_value: object = _UNAVAILABLE
+        try:
+            enum_value = enum_values[field_value]
+        except _SDK_EXCEPTION:
+            pass
+        if enum_value is _UNAVAILABLE:
+            return None
+        enum_name: object = self._guarded_attribute(enum_value, "name")
+        return enum_name if isinstance(enum_name, str) else None
 
     def _parameter_value(self, parameter_value: object) -> ParameterValue | None:
         """The scalar form of a MathOpt parameter."""
