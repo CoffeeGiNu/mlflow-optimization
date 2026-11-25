@@ -1,6 +1,6 @@
 """Common rules for metric names, missing values and gaps."""
 
-from math import isfinite
+from math import isfinite, isinf
 
 from .types import (
     COMMON_METRICS,
@@ -78,6 +78,9 @@ def normalize_metrics(
         if reported.has_objective is False:
             missing["objective_value"] = MissingReason.UNDEFINED
             missing["dual_bound"] = MissingReason.UNDEFINED
+        elif reported.objective_value is MissingReason.UNBOUNDED:
+            missing["objective_value"] = MissingReason.UNBOUNDED
+            _record_reported_metric(values, missing, "dual_bound", reported.dual_bound)
         elif has_solution is False:
             missing["objective_value"] = MissingReason.NO_SOLUTION
             _record_reported_metric(values, missing, "dual_bound", reported.dual_bound)
@@ -98,6 +101,9 @@ def normalize_metrics(
         if reported.has_objective is False:
             missing["absolute_gap"] = MissingReason.UNDEFINED
             missing["relative_gap"] = MissingReason.UNDEFINED
+        elif reported.objective_value is MissingReason.UNBOUNDED:
+            missing["absolute_gap"] = MissingReason.UNBOUNDED
+            missing["relative_gap"] = MissingReason.UNBOUNDED
         elif has_solution is False:
             missing["absolute_gap"] = MissingReason.NO_SOLUTION
             missing["relative_gap"] = MissingReason.NO_SOLUTION
@@ -122,6 +128,15 @@ def normalize_metrics(
                 values["relative_gap"] = relative_gap
             else:
                 missing["relative_gap"] = MissingReason.UNDEFINED
+
+    if (
+        reported is not None
+        and isinstance(reported.dual_bound, float)
+        and isinf(reported.dual_bound)
+    ):
+        tags["optimization.dual_bound_infinity"] = (
+            "+inf" if reported.dual_bound > 0 else "-inf"
+        )
 
     for metric_name in COMMON_METRICS:
         if metric_name not in values and metric_name not in missing:

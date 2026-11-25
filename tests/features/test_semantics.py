@@ -407,3 +407,76 @@ def test_parameter_origins_use_distinct_namespaces(
     )
 
     assert collected.params == {expected_parameter_name: str(parameter.value)}
+
+
+@pytest.mark.parametrize("has_solution", (True, False))
+def test_unbounded_objective_is_missing_as_unbounded_with_or_without_solution(
+    has_solution: bool,
+) -> None:
+    reported: ReportedMetrics = ReportedMetrics(
+        has_objective=True,
+        sense=ObjectiveSense.MINIMIZE,
+        objective_value=MissingReason.UNBOUNDED,
+        dual_bound=5.0,
+    )
+    normalized: NormalizedMetrics = normalize_metrics(
+        reported,
+        api="fake",
+        has_solution=has_solution,
+        wall_time_seconds=1.0,
+        include_native=False,
+    )
+
+    for metric_name in ("objective_value", "absolute_gap", "relative_gap"):
+        assert metric_name not in normalized.values
+        assert (
+            normalized.tags[f"optimization.missing.{metric_name}"]
+            == MissingReason.UNBOUNDED.value
+        )
+
+
+@pytest.mark.parametrize(
+    ("dual_bound", "expected_tag"),
+    ((math.inf, "+inf"), (-math.inf, "-inf")),
+)
+def test_infinite_dual_bound_is_undefined_and_tagged_with_its_sign(
+    dual_bound: float, expected_tag: str
+) -> None:
+    reported: ReportedMetrics = ReportedMetrics(
+        has_objective=True,
+        sense=ObjectiveSense.MINIMIZE,
+        objective_value=1.0,
+        dual_bound=dual_bound,
+    )
+    normalized: NormalizedMetrics = normalize_metrics(
+        reported,
+        api="fake",
+        has_solution=True,
+        wall_time_seconds=1.0,
+        include_native=False,
+    )
+
+    assert "dual_bound" not in normalized.values
+    assert (
+        normalized.tags["optimization.missing.dual_bound"]
+        == MissingReason.UNDEFINED.value
+    )
+    assert normalized.tags["optimization.dual_bound_infinity"] == expected_tag
+
+
+def test_nan_dual_bound_gets_no_infinity_tag() -> None:
+    reported: ReportedMetrics = ReportedMetrics(
+        has_objective=True,
+        sense=ObjectiveSense.MINIMIZE,
+        objective_value=1.0,
+        dual_bound=math.nan,
+    )
+    normalized: NormalizedMetrics = normalize_metrics(
+        reported,
+        api="fake",
+        has_solution=True,
+        wall_time_seconds=1.0,
+        include_native=False,
+    )
+
+    assert "optimization.dual_bound_infinity" not in normalized.tags

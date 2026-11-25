@@ -1,7 +1,9 @@
 """What is observed about a solve."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from mlflow_optimization.features.artifacts.types import ArtifactRequest
 from mlflow_optimization.features.metadata.types import ReportedMetadata
 from mlflow_optimization.features.metrics.types import ReportedMetrics
 from mlflow_optimization.features.outcomes.types import ReportedOutcome
@@ -15,6 +17,8 @@ class SolveObservation:
     outcome: ReportedOutcome
     metrics: ReportedMetrics = field(default_factory=ReportedMetrics)
     metadata: ReportedMetadata = field(default_factory=ReportedMetadata)
+    artifacts: tuple[ArtifactRequest, ...] = ()
+    diagnostics: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

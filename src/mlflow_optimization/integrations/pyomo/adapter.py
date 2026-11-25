@@ -7,9 +7,15 @@ import pkgutil
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import timedelta
 from functools import wraps
+from pathlib import Path
 from typing import Any, cast
 
+from mlflow_optimization.common.diagnostics import warn
 from mlflow_optimization.common.patching import Patch, receiver_of
+from mlflow_optimization.features.artifacts.types import (
+    ArtifactRequest,
+    ArtifactWorkspace,
+)
 from mlflow_optimization.features.autolog.ports import ObservationError, SolveObserver
 from mlflow_optimization.features.autolog.types import SolveObservation
 from mlflow_optimization.features.metadata.types import (
@@ -206,6 +212,9 @@ class PyomoAdapter:
                             self._solver_time_snapshot(solver)
                         )
 
+                        artifacts: list[ArtifactRequest] = []
+                        diagnostics: dict[str, str] = {}
+
                         def extract(
                             result: Any | None,
                             error: BaseException | None,
@@ -218,10 +227,27 @@ class PyomoAdapter:
                                 solve_keywords,
                                 bound_arguments.arguments,
                                 solver_time_before,
+                                solve_observer.artifact_workspace(),
+                                artifacts,
+                                diagnostics,
                             )
 
                         def call(hook: ProgressHook | None) -> Any:
-                            return original(*solve_arguments, **solve_keywords)
+                            workspace: ArtifactWorkspace | None = (
+                                solve_observer.artifact_workspace()
+                            )
+                            if workspace is None:
+                                return original(*solve_arguments, **solve_keywords)
+                            return self._solve_with_artifacts(
+                                original,
+                                solve_arguments,
+                                solve_keywords,
+                                solver,
+                                model,
+                                workspace,
+                                artifacts,
+                                diagnostics,
+                            )
 
                         return solve_observer.observe(self.api, call, extract)
 
@@ -234,6 +260,218 @@ class PyomoAdapter:
                 patch.uninstall()
             raise
         self._patches = patches
+
+    def _solve_with_artifacts(
+        self,
+        original: Callable[..., Any],
+        solve_arguments: tuple[Any, ...],
+        solve_keywords: Mapping[str, Any],
+        solver: Any,
+        model: Any | None,
+        workspace: ArtifactWorkspace,
+        artifacts: list[ArtifactRequest],
+        diagnostics: dict[str, str],
+    ) -> Any:
+        if workspace.options.solver_model:
+            self._write_model(model, workspace.directory, artifacts, diagnostics)
+        call_keywords: dict[str, Any] = dict(solve_keywords)
+        log_path: Path = workspace.directory / "log.txt"
+        restorations: list[Callable[[], None]] = []
+        read_path: Path | None = None
+        read_offset: int = 0
+        if workspace.options.solver_log:
+            config: Any = self._read(solver, "config")[0]
+            try:
+                if hasattr(config, "logfile"):
+                    user_logfile: Any = config.logfile
+                    if user_logfile:
+                        read_path = Path(str(user_logfile))
+                        read_offset = (
+                            read_path.stat().st_size if read_path.exists() else 0
+                        )
+                    else:
+                        config.logfile = str(log_path)
+                        read_path = log_path
+
+                        def restore() -> None:
+                            config.logfile = user_logfile
+
+                        restorations.append(restore)
+                elif self._is_shell_solver(solver):
+                    user_path: Any | None = call_keywords.get("logfile")
+                    if user_path:
+                        read_path = Path(str(user_path))
+                        read_offset = (
+                            read_path.stat().st_size if read_path.exists() else 0
+                        )
+                    else:
+                        call_keywords["logfile"] = str(log_path)
+                        read_path = log_path
+                else:
+                    diagnostics["optimization.artifacts.solver_log"] = "unsupported"
+            except Exception as setup_error:  # noqa: BLE001
+                read_path = None
+                self._mark_failed(
+                    "optimization.artifacts.solver_log",
+                    setup_error,
+                    diagnostics,
+                )
+        try:
+            return original(*solve_arguments, **call_keywords)
+        finally:
+            for restoration in restorations:
+                try:
+                    restoration()
+                except Exception as restore_error:  # noqa: BLE001
+                    warn(
+                        f"Restoring the Pyomo solver log setting failed: {restore_error}"
+                    )
+            if read_path is not None:
+                self._collect_log(
+                    read_path,
+                    read_offset,
+                    log_path,
+                    artifacts,
+                    diagnostics,
+                )
+
+    def _is_shell_solver(self, solver: Any) -> bool:
+        try:
+            shell_module: Any = importlib.import_module("pyomo.opt.solver.shellcmd")
+            return isinstance(solver, shell_module.SystemCallSolver)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _mark_failed(
+        self,
+        tag: str,
+        error: BaseException,
+        diagnostics: dict[str, str],
+    ) -> None:
+        diagnostics[tag] = "failed"
+        warn(f"Pyomo artifact collection failed for {tag}: {error}")
+
+    def _write_model(
+        self,
+        model: Any | None,
+        directory: Path,
+        artifacts: list[ArtifactRequest],
+        diagnostics: dict[str, str],
+    ) -> None:
+        tag: str = "optimization.artifacts.solver_model"
+        if model is None:
+            diagnostics[tag] = "unsupported"
+            return
+        try:
+            model_path: Path = directory / "model.lp"
+            model.write(
+                str(model_path),
+                format="lp",
+                io_options={"symbolic_solver_labels": True},
+            )
+        except Exception as write_error:  # noqa: BLE001
+            self._mark_failed(tag, write_error, diagnostics)
+            return
+        artifacts.append(ArtifactRequest(str(model_path), "model"))
+        diagnostics[tag] = "true"
+
+    def _collect_log(
+        self,
+        read_path: Path,
+        read_offset: int,
+        log_path: Path,
+        artifacts: list[ArtifactRequest],
+        diagnostics: dict[str, str],
+    ) -> None:
+        try:
+            with read_path.open("rb") as source:
+                source.seek(read_offset)
+                content: bytes = source.read()
+            log_path.write_bytes(content)
+        except Exception as log_error:  # noqa: BLE001
+            self._mark_failed(
+                "optimization.artifacts.solver_log",
+                log_error,
+                diagnostics,
+            )
+            return
+        artifacts.append(ArtifactRequest(str(log_path), "solver"))
+        diagnostics["optimization.artifacts.solver_log"] = "true"
+
+    def _diagnose_infeasibility(
+        self,
+        solver: Any,
+        model: Any | None,
+        termination: Termination,
+        directory: Path,
+        artifacts: list[ArtifactRequest],
+        diagnostics: dict[str, str],
+    ) -> None:
+        tag: str = "optimization.diagnostics.infeasibility"
+        if termination is Termination.INFEASIBLE_OR_UNBOUNDED:
+            diagnostics[tag] = "undetermined"
+            return
+        if termination is not Termination.INFEASIBLE:
+            return
+        try:
+            iis_path: Path | None = self._write_iis(solver, model, directory)
+        except Exception as iis_error:  # noqa: BLE001
+            self._mark_failed(tag, iis_error, diagnostics)
+            return
+        if iis_path is None:
+            diagnostics[tag] = "unsupported"
+            return
+        artifacts.append(ArtifactRequest(str(iis_path), "diagnostics"))
+        diagnostics[tag] = "iis"
+
+    def _write_iis(
+        self, solver: Any, model: Any | None, directory: Path
+    ) -> Path | None:
+        owner_modules: str = " ".join(
+            owner.__module__ for owner in type(solver).__mro__
+        )
+        for solver_name in ("gurobi", "cplex", "xpress"):
+            if solver_name in owner_modules and model is not None:
+                iis_module: Any = importlib.import_module("pyomo.contrib.iis")
+                iis_path: Path = directory / "iis.ilp"
+                iis_module.write_iis(model, str(iis_path), solver=solver_name)
+                return iis_path
+        if self._engine(solver) != "highs":
+            return None
+        highspy_module: Any = importlib.import_module("highspy")
+        native_solver: Any = self._read(solver, "_solver_model")[0]
+        problem: Any = native_solver.getLp()
+        if any(
+            variable_type != highspy_module.HighsVarType.kContinuous
+            for variable_type in problem.integrality_
+        ):
+            return None
+        # NOTE: A fresh instance keeps the user's HiGHS instance untouched.
+        isolated: Any = highspy_module.Highs()
+        isolated.setOptionValue("output_flag", False)
+        isolated.setOptionValue("iis_strategy", 6)
+        # NOTE: Pyomo does not name the HiGHS rows and columns; label them for readable IIS output.
+        row_names: list[str] = [f"r{index}" for index in range(problem.num_row_)]
+        column_names: list[str] = [f"c{index}" for index in range(problem.num_col_)]
+        for constraint, row_index in solver._pyomo_con_to_solver_con_map.items():
+            row_names[row_index] = constraint.name
+        if model is not None:
+            variable_type: Any = importlib.import_module("pyomo.core.base.var").Var
+            for variable in model.component_data_objects(variable_type):
+                column_index: int | None = solver._pyomo_var_to_solver_var_map.get(
+                    id(variable)
+                )
+                if column_index is not None:
+                    column_names[column_index] = variable.name
+        problem.row_names_ = row_names
+        problem.col_names_ = column_names
+        isolated.passModel(problem)
+        iis: Any = isolated.getIis()[1]
+        if not iis.valid_ or (len(iis.row_index_) == 0 and len(iis.col_index_) == 0):
+            return None
+        iis_path = directory / "iis.lp"
+        isolated.writeIisModel(str(iis_path))
+        return iis_path if iis_path.exists() else None
 
     def _solve_overrides(self, owner: type[Any]) -> list[type[Any]]:
         overrides: list[type[Any]] = []
@@ -288,6 +526,9 @@ class PyomoAdapter:
         solve_keywords: Mapping[str, Any],
         bound_arguments: Mapping[str, Any],
         solver_time_before: tuple[Any | None, float | None] | None = None,
+        workspace: ArtifactWorkspace | None = None,
+        artifacts: Sequence[ArtifactRequest] = (),
+        diagnostics: Mapping[str, str] | None = None,
     ) -> SolveObservation:
         try:
             outcome: ReportedOutcome = self._outcome(solver, result, error)
@@ -307,7 +548,25 @@ class PyomoAdapter:
                 bound_arguments,
                 error,
             )
-            return SolveObservation(self.api, outcome, metrics, metadata)
+            collected_artifacts: list[ArtifactRequest] = list(artifacts)
+            collected_diagnostics: dict[str, str] = dict(diagnostics or {})
+            if workspace is not None and workspace.options.diagnose_infeasibility:
+                self._diagnose_infeasibility(
+                    solver,
+                    model,
+                    outcome.termination,
+                    workspace.directory,
+                    collected_artifacts,
+                    collected_diagnostics,
+                )
+            return SolveObservation(
+                self.api,
+                outcome,
+                metrics,
+                metadata,
+                tuple(collected_artifacts),
+                collected_diagnostics,
+            )
         except Exception as extraction_error:
             raise ObservationError(
                 "Pyomo solve observation extraction failed."
@@ -382,6 +641,8 @@ class PyomoAdapter:
             and has_solution is True
         ):
             termination = Termination.FEASIBLE
+        if termination is Termination.UNBOUNDED:
+            has_solution = False
         return ReportedOutcome(raw_status, termination, has_solution)
 
     def _map_termination(self, value: Any | None) -> Termination:
@@ -564,7 +825,9 @@ class PyomoAdapter:
                 sense,
                 native_solver,
             )
-        if has_solution is False and has_objective is not False:
+        if outcome.termination is Termination.UNBOUNDED and has_objective is not False:
+            objective_value = MissingReason.UNBOUNDED
+        elif has_solution is False and has_objective is not False:
             objective_value = MissingReason.NO_SOLUTION
         if objective_value is MissingReason.UNSUPPORTED and has_objective is False:
             objective_value = MissingReason.UNDEFINED
@@ -611,6 +874,8 @@ class PyomoAdapter:
         problem.update(self._model_size(model))
         if not problem and error is None:
             problem.update(self._result_size(result))
+        if error is None:
+            problem.update(self._presolved_size(solver))
         parameters: tuple[SolverParameter, ...] = self._parameters(
             solver,
             solve_keywords,
@@ -627,6 +892,22 @@ class PyomoAdapter:
             parameters=parameters,
             wall_time_includes_problem_build=True,
         )
+
+    def _presolved_size(self, solver: Any) -> dict[str, int]:
+        if self._engine(solver) != "highs" or not any(
+            owner.__module__.startswith("pyomo.contrib.appsi")
+            for owner in type(solver).__mro__
+        ):
+            return {}
+        try:
+            native_solver: Any = self._read(solver, "_solver_model")[0]
+            presolved: Any = native_solver.getPresolvedLp()
+            return {
+                "presolved_num_variables": int(presolved.num_col_),
+                "presolved_num_constraints": int(presolved.num_row_),
+            }
+        except Exception:  # noqa: BLE001
+            return {}
 
     def _model_size(self, model: Any | None) -> dict[str, int]:
         if model is None:

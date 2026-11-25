@@ -1,13 +1,21 @@
 """Observation of Gurobi solve calls."""
 
+import os
 from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from functools import wraps
 from inspect import Parameter, Signature, signature
 from math import inf, isfinite
+from pathlib import Path
 from typing import Any
 
 import gurobipy
+from mlflow_optimization.common.diagnostics import warn
 from mlflow_optimization.common.patching import Patch, receiver_of
+from mlflow_optimization.features.artifacts.types import (
+    ArtifactRequest,
+    ArtifactWorkspace,
+)
 from mlflow_optimization.features.autolog.ports import (
     ObservationError,
     SolveObserver,
@@ -48,6 +56,14 @@ _STATUS_TERMINATIONS: dict[int, tuple[str, Termination]] = {
 }
 
 
+@dataclass
+class _ArtifactState:
+    """Artifact work shared between the solve call and the observation."""
+
+    requests: list[ArtifactRequest] = field(default_factory=list)
+    tags: dict[str, str] = field(default_factory=dict)
+
+
 class GurobiAdapter(SolverIntegration):
     """The Gurobi solver integration."""
 
@@ -65,7 +81,24 @@ class GurobiAdapter(SolverIntegration):
                 if receiver is None:
                     return original(*args, **kwargs)
 
+                state: _ArtifactState = _ArtifactState()
+
                 def call(hook: ProgressHook | None) -> Any:
+                    workspace: ArtifactWorkspace | None = (
+                        solve_observer.artifact_workspace()
+                    )
+                    if workspace is None or not isinstance(receiver, gurobipy.Model):
+                        return solve(hook)
+                    restore: Callable[[], None] | None = _prepare_artifacts(
+                        receiver, workspace, state
+                    )
+                    try:
+                        return solve(hook)
+                    finally:
+                        if restore is not None:
+                            restore()
+
+                def solve(hook: ProgressHook | None) -> Any:
                     if hook is None or not isinstance(receiver, gurobipy.Model):
                         return original(*args, **kwargs)
                     composed_arguments: (
@@ -89,7 +122,19 @@ class GurobiAdapter(SolverIntegration):
                         ) from error
                     model: gurobipy.Model = receiver
                     try:
-                        return _extract(model, error)
+                        observation: SolveObservation = _extract(model, error)
+                        diagnosis_workspace: ArtifactWorkspace | None = (
+                            solve_observer.artifact_workspace()
+                        )
+                        if diagnosis_workspace is not None:
+                            _diagnose_infeasibility(
+                                model, observation, error, diagnosis_workspace, state
+                            )
+                        return replace(
+                            observation,
+                            artifacts=tuple(state.requests),
+                            diagnostics=dict(state.tags),
+                        )
                     except Exception as observation_error:
                         raise ObservationError(
                             "Could not build a Gurobi solve observation."
@@ -103,6 +148,95 @@ class GurobiAdapter(SolverIntegration):
 
     def uninstall(self) -> None:
         self._patch.uninstall()
+
+
+def _prepare_artifacts(
+    model: gurobipy.Model, workspace: ArtifactWorkspace, state: _ArtifactState
+) -> Callable[[], None] | None:
+    if workspace.options.solver_model:
+        try:
+            model.update()
+            model_path: Path = workspace.directory / "model.mps"
+            model.write(str(model_path))
+            state.requests.append(ArtifactRequest(str(model_path), "model"))
+            state.tags["optimization.artifacts.solver_model"] = "true"
+        except Exception as write_error:  # noqa: BLE001
+            state.tags["optimization.artifacts.solver_model"] = "failed"
+            warn(f"Could not attach the Gurobi model: {write_error}")
+    if not workspace.options.solver_log:
+        return None
+    try:
+        return _capture_log(model, workspace, state)
+    except Exception as log_error:  # noqa: BLE001
+        state.tags["optimization.artifacts.solver_log"] = "failed"
+        warn(f"Could not capture the Gurobi log: {log_error}")
+        return None
+
+
+def _capture_log(
+    model: gurobipy.Model, workspace: ArtifactWorkspace, state: _ArtifactState
+) -> Callable[[], None]:
+    user_log_file: str = model.Params.LogFile
+    user_output_flag: int = model.Params.OutputFlag
+    user_console_flag: int = model.Params.LogToConsole
+    log_file: str = user_log_file
+    offset: int = 0
+    if user_log_file:
+        offset = os.path.getsize(user_log_file) if os.path.exists(user_log_file) else 0
+    else:
+        log_file = str(workspace.directory / "gurobi.log")
+        # NOTE: Silent parameter order keeps a muted solve off the console.
+        if user_output_flag == 0:
+            model.Params.LogToConsole = 0
+            model.Params.OutputFlag = 1
+        model.Params.LogFile = log_file
+
+    def restore() -> None:
+        try:
+            if not user_log_file:
+                model.Params.LogFile = ""
+                if user_output_flag == 0:
+                    model.Params.OutputFlag = 0
+                    model.Params.LogToConsole = user_console_flag
+        except Exception as restore_error:  # noqa: BLE001
+            warn(f"Could not restore the Gurobi log settings: {restore_error}")
+        try:
+            attached_path: Path = workspace.directory / "log.txt"
+            with open(log_file, "rb") as source:
+                source.seek(offset)
+                attached_path.write_bytes(source.read())
+            state.requests.append(ArtifactRequest(str(attached_path), "solver"))
+            state.tags["optimization.artifacts.solver_log"] = "true"
+        except Exception as copy_error:  # noqa: BLE001
+            state.tags["optimization.artifacts.solver_log"] = "failed"
+            warn(f"Could not attach the Gurobi log: {copy_error}")
+
+    return restore
+
+
+def _diagnose_infeasibility(
+    model: gurobipy.Model,
+    observation: SolveObservation,
+    error: BaseException | None,
+    workspace: ArtifactWorkspace,
+    state: _ArtifactState,
+) -> None:
+    if not workspace.options.diagnose_infeasibility or error is not None:
+        return
+    if observation.outcome.termination is not Termination.INFEASIBLE:
+        return
+    try:
+        model.computeIIS()
+        iis_path: Path = workspace.directory / "iis.ilp"
+        model.write(str(iis_path))
+        state.requests.append(ArtifactRequest(str(iis_path), "diagnostics"))
+        state.tags["optimization.diagnostics.infeasibility"] = "iis"
+        state.tags["optimization.diagnostics.iis_minimal"] = (
+            "true" if model.IISMinimal else "false"
+        )
+    except Exception as iis_error:  # noqa: BLE001
+        state.tags["optimization.diagnostics.infeasibility"] = "failed"
+        warn(f"Could not compute the Gurobi IIS: {iis_error}")
 
 
 def _compose_callback_arguments(
@@ -248,9 +382,11 @@ def _extract(model: gurobipy.Model, error: BaseException | None) -> SolveObserva
     has_objective: bool | None = _read_has_objective(model)
     sense: ObjectiveSense | None = _read_sense(model)
     objective_value: float | MissingReason = _read_objective_value(
-        model, has_objective, has_solution
+        model, has_objective, has_solution, termination
     )
-    dual_bound: float | MissingReason = _read_dual_bound(model, has_objective)
+    dual_bound: float | MissingReason = _read_dual_bound(
+        model, has_objective, termination
+    )
     solver_time_seconds: float | MissingReason = _read_solver_number(model, "Runtime")
     statistics: dict[str, float | MissingReason] = {
         "node_count": _read_solver_number(model, "NodeCount"),
@@ -482,20 +618,30 @@ def _read_objective_value(
     model: gurobipy.Model,
     has_objective: bool | None,
     has_solution: bool | None,
+    termination: Termination,
 ) -> float | MissingReason:
     if has_objective is False:
         return MissingReason.UNDEFINED
+    if termination is Termination.UNBOUNDED:
+        return MissingReason.UNBOUNDED
     if has_solution is False:
         return MissingReason.NO_SOLUTION
     return _read_solver_number(model, "ObjVal")
 
 
 def _read_dual_bound(
-    model: gurobipy.Model, has_objective: bool | None
+    model: gurobipy.Model, has_objective: bool | None, termination: Termination
 ) -> float | MissingReason:
     if has_objective is False:
         return MissingReason.UNDEFINED
-    return _read_solver_number(model, "ObjBound")
+    dual_bound: float | MissingReason = _read_solver_number(model, "ObjBound")
+    if dual_bound is MissingReason.FAILED and termination in (
+        Termination.INFEASIBLE,
+        Termination.UNBOUNDED,
+        Termination.INFEASIBLE_OR_UNBOUNDED,
+    ):
+        return MissingReason.UNDEFINED
+    return dual_bound
 
 
 def _read_parameters(model: gurobipy.Model) -> tuple[SolverParameter, ...]:

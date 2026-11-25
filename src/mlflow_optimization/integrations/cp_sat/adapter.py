@@ -1,15 +1,23 @@
 """Observation support for OR-Tools CP-SAT."""
 
+import dataclasses
+import json
 import math
 from collections.abc import Callable
 from functools import wraps
+from pathlib import Path
 from typing import Any
 
 import ortools
 from ortools.sat import sat_parameters_pb2
 from ortools.sat.python import cp_model
 
+from mlflow_optimization.common.diagnostics import warn
 from mlflow_optimization.common.patching import Patch, receiver_of
+from mlflow_optimization.features.artifacts.types import (
+    ArtifactRequest,
+    ArtifactWorkspace,
+)
 from mlflow_optimization.features.autolog.ports import (
     ObservationError,
     SolveObserver,
@@ -105,7 +113,10 @@ class CpSatAdapter:
             if model is None and len(args) > 1:
                 model = args[1]
 
-            def call(hook: ProgressHook | None) -> Any:
+            artifacts: list[ArtifactRequest] = []
+            diagnostics: dict[str, str] = {}
+
+            def solve(hook: ProgressHook | None) -> Any:
                 if hook is None:
                     return original(*args, **kwargs)
                 return self._call_with_progress(
@@ -117,15 +128,125 @@ class CpSatAdapter:
                     hook,
                 )
 
+            def call(hook: ProgressHook | None) -> Any:
+                workspace: ArtifactWorkspace | None = observer.artifact_workspace()
+                if workspace is None:
+                    return solve(hook)
+                return self._call_with_artifacts(
+                    lambda: solve(hook),
+                    solver,
+                    model,
+                    workspace,
+                    artifacts,
+                    diagnostics,
+                )
+
             def extract(
                 result: Any | None,
                 error: BaseException | None,
             ) -> SolveObservation:
-                return self._extract(solver, model, result, error)
+                observation: SolveObservation = self._extract(
+                    solver, model, result, error
+                )
+                workspace: ArtifactWorkspace | None = observer.artifact_workspace()
+                if workspace is not None and workspace.options.diagnose_infeasibility:
+                    self._diagnose_core(
+                        solver, model, observation, workspace, artifacts, diagnostics
+                    )
+                return dataclasses.replace(
+                    observation,
+                    artifacts=tuple(artifacts),
+                    diagnostics=diagnostics,
+                )
 
             return observer.observe(self.api, call, extract)
 
         return wrapped
+
+    def _call_with_artifacts(
+        self,
+        solve: Callable[[], Any],
+        solver: Any,
+        model: Any | None,
+        workspace: ArtifactWorkspace,
+        artifacts: list[ArtifactRequest],
+        diagnostics: dict[str, str],
+    ) -> Any:
+        if workspace.options.solver_model and model is not None:
+            model_tag: str = "optimization.artifacts.solver_model"
+            try:
+                model_path: Path = workspace.directory / "model.pbtxt"
+                model.export_to_file(str(model_path))
+                artifacts.append(ArtifactRequest(str(model_path), "model"))
+                diagnostics[model_tag] = "true"
+            except Exception as export_error:  # noqa: BLE001
+                diagnostics[model_tag] = "failed"
+                warn(f"Could not export the CP-SAT model: {export_error}")
+        if not workspace.options.solver_log:
+            return solve()
+        log_tag: str = "optimization.artifacts.solver_log"
+        parameters: Any = solver.parameters
+        saved_search_progress: bool = parameters.log_search_progress
+        saved_to_response: bool = parameters.log_to_response
+        saved_to_stdout: bool = parameters.log_to_stdout
+        try:
+            if not saved_search_progress:
+                parameters.log_to_stdout = False
+            parameters.log_search_progress = True
+            parameters.log_to_response = True
+        except Exception as setup_error:  # noqa: BLE001
+            diagnostics[log_tag] = "failed"
+            warn(f"Could not enable the CP-SAT solver log: {setup_error}")
+        try:
+            return solve()
+        finally:
+            parameters.log_search_progress = saved_search_progress
+            parameters.log_to_response = saved_to_response
+            parameters.log_to_stdout = saved_to_stdout
+            if log_tag not in diagnostics:
+                try:
+                    log_path: Path = workspace.directory / "log.txt"
+                    log_path.write_text(solver.solve_log)
+                    artifacts.append(ArtifactRequest(str(log_path), "solver"))
+                    diagnostics[log_tag] = "true"
+                except Exception as log_error:  # noqa: BLE001
+                    diagnostics[log_tag] = "failed"
+                    warn(f"Could not read the CP-SAT solver log: {log_error}")
+
+    def _diagnose_core(
+        self,
+        solver: Any,
+        model: Any | None,
+        observation: SolveObservation,
+        workspace: ArtifactWorkspace,
+        artifacts: list[ArtifactRequest],
+        diagnostics: dict[str, str],
+    ) -> None:
+        if observation.outcome.termination is not Termination.INFEASIBLE:
+            return
+        tag: str = "optimization.diagnostics.infeasibility"
+        if model is None:
+            return
+        try:
+            if len(model.proto.assumptions) == 0:
+                diagnostics[tag] = "no_assumptions"
+                return
+            variables: Any = model.proto.variables
+            core: list[dict[str, Any]] = []
+            for index in solver.sufficient_assumptions_for_infeasibility():
+                name: str = (
+                    variables[index].name
+                    if index >= 0
+                    else f"not {variables[-index - 1].name}"
+                )
+                core.append({"index": index, "name": name})
+            core_path: Path = workspace.directory / "core.json"
+            core_path.write_text(json.dumps(core))
+            artifacts.append(ArtifactRequest(str(core_path), "diagnostics"))
+            diagnostics[tag] = "core"
+        except Exception as core_error:  # noqa: BLE001
+            diagnostics[tag] = "failed"
+            warn(f"Could not read the CP-SAT infeasibility core: {core_error}")
 
     def _call_with_progress(
         self,

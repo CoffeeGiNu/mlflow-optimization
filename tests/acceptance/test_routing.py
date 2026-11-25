@@ -228,6 +228,62 @@ def test_requested_route_artifact_is_attached_only_to_its_solve(
     assert artifact_paths == ["route.txt"]
 
 
+def _solve_infeasible_routing_problem() -> pywrapcp.Assignment | None:
+    manager: pywrapcp.RoutingIndexManager = pywrapcp.RoutingIndexManager(4, 1, 0)
+    model: pywrapcp.RoutingModel = pywrapcp.RoutingModel(manager)
+    model.solver().Add(model.NextVar(model.Start(0)) == model.Start(0))
+    return model.SolveWithParameters(pywrapcp.DefaultRoutingSearchParameters())
+
+
+def test_routing_marks_every_requested_artifact_unsupported(
+    tracking: Tracking,
+) -> None:
+    autolog(
+        libraries=["routing"],
+        log_solver_log=True,
+        log_solver_model=True,
+        diagnose_infeasibility=True,
+    )
+
+    assert _solve_infeasible_routing_problem() is None
+
+    run: Run = tracking.solve_runs()[0]
+    tags: dict[str, str] = run.data.tags
+    assert tags["optimization.artifacts.solver_log"] == "unsupported"
+    assert tags["optimization.artifacts.solver_model"] == "unsupported"
+    assert tags["optimization.diagnostics.infeasibility"] == "unsupported"
+    assert tracking.client.list_artifacts(run.info.run_id) == []
+
+
+def test_routing_infeasibility_tag_only_appears_for_infeasible_solves(
+    tracking: Tracking,
+) -> None:
+    autolog(libraries=["routing"], diagnose_infeasibility=True, log_solver_log=True)
+
+    assert _solve_routing_problem(1) is not None
+
+    tags: dict[str, str] = tracking.solve_runs()[0].data.tags
+    assert tags["optimization.artifacts.solver_log"] == "unsupported"
+    assert "optimization.artifacts.solver_model" not in tags
+    assert "optimization.diagnostics.infeasibility" not in tags
+
+
+def test_routing_emits_no_artifact_tags_without_requests_or_artifact_logging(
+    tracking: Tracking,
+) -> None:
+    autolog(libraries=["routing"])
+    _solve_infeasible_routing_problem()
+    autolog(libraries=["routing"], log_artifacts=False, log_solver_log=True)
+    _solve_infeasible_routing_problem()
+
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 2
+    for run in runs:
+        for tag_name in run.data.tags:
+            assert not tag_name.startswith("optimization.artifacts.")
+            assert not tag_name.startswith("optimization.diagnostics.")
+
+
 def _solve_routing_problem(vehicle_count: int) -> pywrapcp.Assignment | None:
     routing_index_manager: pywrapcp.RoutingIndexManager = pywrapcp.RoutingIndexManager(
         len(DISTANCE_MATRIX), vehicle_count, 0

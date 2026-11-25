@@ -14,6 +14,7 @@ FEATURE_IMPORT_RULES: dict[str, dict[str, frozenset[str] | None]] = {
     "annotations": {},
     "artifacts": {},
     "autolog": {
+        "artifacts": frozenset({"types"}),
         "metadata": frozenset({"types"}),
         "metrics": frozenset({"types"}),
         "outcomes": frozenset({"types"}),

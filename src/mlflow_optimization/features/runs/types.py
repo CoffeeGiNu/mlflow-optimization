@@ -47,3 +47,6 @@ class RecordOptions:
     log_solver_metrics: bool = True
     log_artifacts: bool = True
     log_progress: bool = True
+    log_solver_log: bool = False
+    log_solver_model: bool = False
+    diagnose_infeasibility: bool = False

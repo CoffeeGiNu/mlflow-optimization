@@ -3,6 +3,10 @@
 from collections.abc import Callable
 from typing import Protocol
 
+from mlflow_optimization.features.artifacts.types import (
+    ArtifactOptions,
+    ArtifactWorkspace,
+)
 from mlflow_optimization.features.progress.types import ProgressHook, SampleSink
 
 from .types import CompletedSolve, SolveObservation
@@ -22,6 +26,10 @@ class SolveObserver(Protocol):
         extract: Callable[[T | None, BaseException | None], SolveObservation],
     ) -> T:
         """The result of ``call(hook)``, observed as one solve unless nested or disabled."""
+        ...
+
+    def artifact_workspace(self) -> ArtifactWorkspace | None:
+        """The workspace of the outermost solve observed in this context."""
         ...
 
 
@@ -59,4 +67,8 @@ class SolveSink(Protocol):
 
     def record(self, solve: CompletedSolve, context: object) -> None:
         """Store one completed solve."""
+        ...
+
+    def artifact_options(self) -> ArtifactOptions:
+        """The automatic artifacts requested for the next solve."""
         ...

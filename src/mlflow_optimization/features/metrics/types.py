@@ -12,6 +12,7 @@ class MissingReason(StrEnum):
     UNDEFINED = "undefined"
     NO_SOLUTION = "no_solution"
     FAILED = "failed"
+    UNBOUNDED = "unbounded"
 
 
 class ObjectiveSense(StrEnum):

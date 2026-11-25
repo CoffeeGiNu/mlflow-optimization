@@ -2,11 +2,13 @@
 
 import math
 from collections.abc import Callable
+from pathlib import Path
 from typing import cast
 
 import pytest
 from conftest import Tracking
 from mlflow.entities import Run
+from ortools.math_opt import model_pb2
 from ortools.math_opt.python import mathopt
 from ortools.math_opt.python.mathopt import solve
 from ortools.math_opt.python.model import Model
@@ -127,7 +129,7 @@ def test_infeasible_problem_records_no_objective_value(tracking: Tracking) -> No
     assert run.data.tags["optimization.missing.objective_value"] == "no_solution"
 
 
-def test_unbounded_problem_keeps_feasible_solution_and_omits_infinite_bound(
+def test_unbounded_problem_records_no_solution_and_unbounded_objective(
     tracking: Tracking,
 ) -> None:
     autolog(libraries=["mathopt"])
@@ -136,8 +138,9 @@ def test_unbounded_problem_keeps_feasible_solution_and_omits_infinite_bound(
     run: Run = _single_solve_run(tracking)
 
     assert run.data.tags["optimization.termination"] == "unbounded"
-    assert run.data.tags["optimization.has_solution"] == "true"
-    assert "objective_value" in run.data.metrics
+    assert run.data.tags["optimization.has_solution"] == "false"
+    assert "objective_value" not in run.data.metrics
+    assert run.data.tags["optimization.missing.objective_value"] == "unbounded"
     assert "dual_bound" not in run.data.metrics
     assert run.data.tags["optimization.missing.dual_bound"] == "undefined"
 
@@ -267,3 +270,104 @@ def test_disable_preserves_a_reassigned_solve_name(tracking: Tracking) -> None:
     finally:
         autolog(disable=True)
         solve = original_solve
+
+
+def _download(tracking: Tracking, run: Run, artifact_path: str) -> Path:
+    """A local copy of one artifact of a run."""
+    return Path(tracking.client.download_artifacts(run.info.run_id, artifact_path))
+
+
+def test_solver_log_is_attached_and_user_message_callback_still_receives_lines(
+    tracking: Tracking,
+) -> None:
+    autolog(libraries=["mathopt"], log_solver_log=True)
+    user_lines: list[str] = []
+
+    mathopt.solve(
+        _make_bounded_model(integer=True),
+        SolverType.GSCIP,
+        msg_cb=user_lines.extend,
+        params=mathopt.SolveParameters(enable_output=True),
+    )
+
+    run: Run = _single_solve_run(tracking)
+    assert user_lines
+    assert run.data.tags["optimization.artifacts.solver_log"] == "true"
+    assert _download(tracking, run, "solver/log.txt").read_text().strip() != ""
+
+
+def test_incremental_solver_log_is_attached(tracking: Tracking) -> None:
+    autolog(libraries=["mathopt"], log_solver_log=True)
+    incremental_solver: mathopt.IncrementalSolver = mathopt.IncrementalSolver(
+        _make_bounded_model(integer=True), SolverType.GSCIP
+    )
+
+    incremental_solver.solve(params=mathopt.SolveParameters(enable_output=True))
+
+    run: Run = _single_solve_run(tracking)
+    assert run.data.tags["optimization.artifacts.solver_log"] == "true"
+    assert _download(tracking, run, "solver/log.txt").read_text().strip() != ""
+
+
+def test_solver_model_reloads_and_resolves_to_the_same_optimum(
+    tracking: Tracking,
+) -> None:
+    autolog(libraries=["mathopt"], log_solver_model=True)
+    model: Model = _make_bounded_model()
+    original: mathopt.SolveResult = mathopt.solve(model, SolverType.GLOP)
+
+    run: Run = _single_solve_run(tracking)
+    assert run.data.tags["optimization.artifacts.solver_model"] == "true"
+    model_proto: model_pb2.ModelProto = model_pb2.ModelProto()
+    model_proto.ParseFromString(_download(tracking, run, "model/model.pb").read_bytes())
+    reloaded: mathopt.SolveResult = mathopt.solve(
+        Model.from_model_proto(model_proto), SolverType.GLOP
+    )
+    assert reloaded.objective_value() == pytest.approx(4.0)
+    assert reloaded.objective_value() == pytest.approx(original.objective_value())
+
+
+def test_infeasibility_diagnosis_is_unsupported(tracking: Tracking) -> None:
+    autolog(libraries=["mathopt"], diagnose_infeasibility=True)
+    _solve(_make_infeasible_model(), SolverType.GLOP)
+
+    run: Run = _single_solve_run(tracking)
+
+    assert run.data.tags["optimization.diagnostics.infeasibility"] == "unsupported"
+
+
+def test_disabled_artifact_logging_ignores_diagnostic_flags(
+    tracking: Tracking,
+) -> None:
+    autolog(
+        libraries=["mathopt"],
+        log_artifacts=False,
+        log_solver_log=True,
+        log_solver_model=True,
+        diagnose_infeasibility=True,
+    )
+    _solve(_make_infeasible_model(), SolverType.GLOP)
+
+    run: Run = _single_solve_run(tracking)
+
+    assert tracking.client.list_artifacts(run.info.run_id) == []
+    assert not [
+        tag
+        for tag in run.data.tags
+        if tag.startswith(("optimization.artifacts.", "optimization.diagnostics."))
+    ]
+
+
+def test_gurobi_infeasibility_diagnosis_attaches_iis(tracking: Tracking) -> None:
+    try:
+        mathopt.solve(_make_infeasible_model(), SolverType.GUROBI)
+    except Exception as error:  # noqa: BLE001
+        pytest.skip(f"MathOpt Gurobi backend is unusable here: {error}")
+    autolog(libraries=["mathopt"], diagnose_infeasibility=True)
+    _solve(_make_infeasible_model(), SolverType.GUROBI)
+
+    run: Run = _single_solve_run(tracking)
+
+    assert run.data.tags["optimization.diagnostics.infeasibility"] == "iis"
+    assert "optimization.diagnostics.iis_minimal" in run.data.tags
+    assert _download(tracking, run, "diagnostics/iis.pb").stat().st_size > 0

@@ -1,3 +1,4 @@
+import json
 import math
 from types import SimpleNamespace
 from typing import Any
@@ -19,6 +20,30 @@ class SolutionCounter(cp_model.CpSolverSolutionCallback):
 
     def on_solution_callback(self) -> None:
         self.calls += 1
+
+
+def _artifact_paths(tracking: Any, run_id: str, path: str | None = None) -> set[str]:
+    paths: set[str] = set()
+    for info in tracking.client.list_artifacts(run_id, path):
+        if info.is_dir:
+            paths |= _artifact_paths(tracking, run_id, info.path)
+        else:
+            paths.add(info.path)
+    return paths
+
+
+def _build_assumption_model() -> cp_model.CpModel:
+    model: cp_model.CpModel = cp_model.CpModel()
+    value: cp_model.IntVar = model.new_int_var(0, 10, "value")
+    other: cp_model.IntVar = model.new_int_var(0, 10, "other")
+    low: cp_model.IntVar = model.new_bool_var("requires_high")
+    high: cp_model.IntVar = model.new_bool_var("requires_low")
+    unrelated: cp_model.IntVar = model.new_bool_var("unrelated")
+    model.add(value >= 5).only_enforce_if(low)
+    model.add(value <= 3).only_enforce_if(high)
+    model.add(other >= 1).only_enforce_if(unrelated)
+    model.add_assumptions([low, high, unrelated])
+    return model
 
 
 class _RaisesOnLength:
@@ -257,3 +282,123 @@ def test_cp_sat_legacy_solve_alias_records_once_and_calls_user_callback(
     assert tags["optimization.solver"] == "cp_sat"
     assert tags["optimization.has_solution"] == "true"
     assert callback.calls > 0
+
+
+def test_cp_sat_diagnoses_infeasibility_with_assumption_core(tracking: Any) -> None:
+    autolog(libraries=["cp_sat"], diagnose_infeasibility=True)
+    solver: cp_model.CpSolver = cp_model.CpSolver()
+    status: cp_model.CpSolverStatus = solver.solve(_build_assumption_model())
+    assert status == cp_model.INFEASIBLE
+
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 1
+    run_id: str = runs[0].info.run_id
+    assert runs[0].data.tags["optimization.diagnostics.infeasibility"] == "core"
+    core_path: str = tracking.client.download_artifacts(run_id, "diagnostics/core.json")
+    with open(core_path) as core_file:
+        core: list[dict[str, Any]] = json.load(core_file)
+    names: set[str] = {entry["name"] for entry in core}
+    assert names == {"requires_high", "requires_low"}
+
+
+def test_cp_sat_infeasibility_without_assumptions_has_no_core(tracking: Any) -> None:
+    autolog(libraries=["cp_sat"], diagnose_infeasibility=True)
+    model: cp_model.CpModel = cp_model.CpModel()
+    value: cp_model.IntVar = model.new_bool_var("value")
+    model.add(value == 0)
+    model.add(value == 1)
+    solver: cp_model.CpSolver = cp_model.CpSolver()
+    solver.solve(model)
+
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 1
+    assert runs[0].data.tags["optimization.diagnostics.infeasibility"] == (
+        "no_assumptions"
+    )
+    assert "diagnostics/core.json" not in _artifact_paths(tracking, runs[0].info.run_id)
+
+
+def test_cp_sat_solver_log_is_attached_and_quiet_by_default(
+    tracking: Any, capfd: pytest.CaptureFixture[str]
+) -> None:
+    autolog(libraries=["cp_sat"], log_solver_log=True)
+    model: cp_model.CpModel = cp_model.CpModel()
+    value: cp_model.IntVar = model.new_int_var(0, 5, "value")
+    model.minimize(value)
+    solver: cp_model.CpSolver = cp_model.CpSolver()
+    solver.solve(model)
+
+    captured: str = capfd.readouterr().out
+    assert captured == ""
+    assert solver.parameters.log_search_progress is False
+    assert solver.parameters.log_to_stdout is True
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 1
+    assert runs[0].data.tags["optimization.artifacts.solver_log"] == "true"
+    log_path: str = tracking.client.download_artifacts(
+        runs[0].info.run_id, "solver/log.txt"
+    )
+    with open(log_path) as log_file:
+        assert log_file.read().strip() != ""
+
+
+def test_cp_sat_solver_log_is_attached_for_invalid_model(tracking: Any) -> None:
+    autolog(libraries=["cp_sat"], log_solver_log=True)
+    model: cp_model.CpModel = cp_model.CpModel()
+    model.new_int_var(0, 5, "value")
+    model.proto.constraints.add().linear.vars.append(99)
+    solver: cp_model.CpSolver = cp_model.CpSolver()
+    status: cp_model.CpSolverStatus = solver.solve(model)
+    assert status == cp_model.MODEL_INVALID
+
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 1
+    assert "solver/log.txt" in _artifact_paths(tracking, runs[0].info.run_id)
+
+
+def test_cp_sat_solver_model_reloads_and_resolves_to_same_optimum(
+    tracking: Any,
+) -> None:
+    autolog(libraries=["cp_sat"], log_solver_model=True)
+    model: cp_model.CpModel = cp_model.CpModel()
+    first: cp_model.IntVar = model.new_int_var(0, 10, "first")
+    second: cp_model.IntVar = model.new_int_var(0, 10, "second")
+    model.add(first + second >= 4)
+    model.minimize(3 * first + 2 * second)
+    solver: cp_model.CpSolver = cp_model.CpSolver()
+    solver.solve(model)
+    assert solver.objective_value == 8
+
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 1
+    assert runs[0].data.tags["optimization.artifacts.solver_model"] == "true"
+    model_path: str = tracking.client.download_artifacts(
+        runs[0].info.run_id, "model/model.pbtxt"
+    )
+    reloaded: cp_model.CpModel = cp_model.CpModel()
+    with open(model_path) as model_file:
+        assert reloaded.proto.parse_text_format(model_file.read())
+    resolved: cp_model.CpSolver = cp_model.CpSolver()
+    assert resolved.solve(reloaded) == cp_model.OPTIMAL
+    assert resolved.objective_value == 8
+
+
+def test_cp_sat_log_artifacts_false_disables_all_diagnostic_outputs(
+    tracking: Any,
+) -> None:
+    autolog(
+        libraries=["cp_sat"],
+        log_artifacts=False,
+        log_solver_log=True,
+        log_solver_model=True,
+        diagnose_infeasibility=True,
+    )
+    solver: cp_model.CpSolver = cp_model.CpSolver()
+    solver.solve(_build_assumption_model())
+
+    runs: list[Run] = tracking.solve_runs()
+    assert len(runs) == 1
+    assert _artifact_paths(tracking, runs[0].info.run_id) == set()
+    for tag in runs[0].data.tags:
+        assert not tag.startswith("optimization.artifacts.")
+        assert not tag.startswith("optimization.diagnostics.")
