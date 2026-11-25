@@ -1,5 +1,6 @@
 """The OR-Tools Routing solver integration."""
 
+import operator
 from collections.abc import Callable
 from functools import wraps
 from inspect import BoundArguments, signature
@@ -30,6 +31,7 @@ from mlflow_optimization.features.outcomes.types import ReportedOutcome, Termina
 from mlflow_optimization.features.progress.types import ProgressHook
 
 _SDK_EXCEPTION: type[Exception] = Exception
+_UNAVAILABLE: object = object()
 _STATUSES: dict[int, tuple[str, Termination]] = {
     0: ("ROUTING_NOT_SOLVED", Termination.UNKNOWN),
     1: ("ROUTING_SUCCESS", Termination.FEASIBLE),
@@ -51,6 +53,51 @@ _ENTRY_POINTS: tuple[str, ...] = (
 )
 
 
+def _guarded_read(read: Callable[..., Any], *arguments: Any) -> Any:
+    """The read result, or the unavailable marker when the SDK raises."""
+    try:
+        return read(*arguments)
+    except _SDK_EXCEPTION:
+        return _UNAVAILABLE
+
+
+def _guarded_attribute(attribute_owner: Any, attribute_name: str) -> Any:
+    """The attribute value, or the unavailable marker when the SDK raises."""
+    return _guarded_read(lambda: getattr(attribute_owner, attribute_name))
+
+
+def _repeated_parameters(
+    parameter_name: str,
+    actual_value: Any,
+    default_value: Any,
+) -> list[SolverParameter]:
+    """The explicit parameter of a repeated field that differs from its default."""
+    actual_values: Any = _guarded_read(lambda: list(actual_value))
+    if actual_values is _UNAVAILABLE:
+        return []
+    default_values: Any = _guarded_read(lambda: list(default_value))
+    if default_values is _UNAVAILABLE or actual_values == default_values:
+        return []
+    actual_values_string: Any = _guarded_read(lambda: str(actual_values))
+    if actual_values_string is _UNAVAILABLE:
+        return []
+    return [
+        SolverParameter(parameter_name, actual_values_string, ParameterOrigin.EXPLICIT)
+    ]
+
+
+def _enum_value_name(enum_type: Any, actual_value: Any) -> Any:
+    """The enum value name for a number, the number itself when unnamed."""
+    enum_value: Any = _guarded_read(
+        lambda: enum_type.values_by_number.get(actual_value)
+    )
+    if enum_value is _UNAVAILABLE:
+        return _UNAVAILABLE
+    if enum_value is None:
+        return actual_value
+    return _guarded_attribute(enum_value, "name")
+
+
 def _explicit_parameters(
     actual: Any,
     defaults: Any,
@@ -63,78 +110,52 @@ def _explicit_parameters(
     except _SDK_EXCEPTION:
         return parameters
     for field in fields:
-        try:
-            field_name: str = field.name
-        except _SDK_EXCEPTION:
+        field_name: Any = _guarded_attribute(field, "name")
+        if field_name is _UNAVAILABLE:
             continue
         parameter_name: str = f"{prefix}.{field_name}" if prefix else field_name
-        try:
-            actual_value: Any = getattr(actual, field_name)
-        except _SDK_EXCEPTION:
+        actual_value: Any = _guarded_attribute(actual, field_name)
+        if actual_value is _UNAVAILABLE:
             continue
-        try:
-            default_value: Any = getattr(defaults, field_name)
-        except _SDK_EXCEPTION:
+        default_value: Any = _guarded_attribute(defaults, field_name)
+        if default_value is _UNAVAILABLE:
             continue
-        try:
-            is_repeated: bool = bool(field.is_repeated)
-        except _SDK_EXCEPTION:
+        repeated_attribute: Any = _guarded_attribute(field, "is_repeated")
+        if repeated_attribute is _UNAVAILABLE:
+            continue
+        is_repeated: Any = _guarded_read(bool, repeated_attribute)
+        if is_repeated is _UNAVAILABLE:
             continue
         if is_repeated:
-            try:
-                actual_values: list[Any] = list(actual_value)
-            except _SDK_EXCEPTION:
-                continue
-            try:
-                default_values: list[Any] = list(default_value)
-            except _SDK_EXCEPTION:
-                continue
-            if actual_values != default_values:
-                try:
-                    actual_values_string: str = str(actual_values)
-                except _SDK_EXCEPTION:
-                    continue
-                parameters.append(
-                    SolverParameter(
-                        parameter_name,
-                        actual_values_string,
-                        ParameterOrigin.EXPLICIT,
-                    )
-                )
+            parameters.extend(
+                _repeated_parameters(parameter_name, actual_value, default_value)
+            )
             continue
-        try:
-            message_type: Any | None = field.message_type
-        except _SDK_EXCEPTION:
+        message_type: Any = _guarded_attribute(field, "message_type")
+        if message_type is _UNAVAILABLE:
             continue
         if message_type is not None:
             parameters.extend(
                 _explicit_parameters(actual_value, default_value, parameter_name)
             )
             continue
-        try:
-            differs_from_default: bool = actual_value != default_value
-        except _SDK_EXCEPTION:
+        differs_from_default: Any = _guarded_read(
+            operator.ne, actual_value, default_value
+        )
+        if differs_from_default is _UNAVAILABLE or not differs_from_default:
             continue
-        if differs_from_default:
-            try:
-                enum_type: Any | None = field.enum_type
-            except _SDK_EXCEPTION:
+        enum_type: Any = _guarded_attribute(field, "enum_type")
+        if enum_type is _UNAVAILABLE:
+            continue
+        value: Any = actual_value
+        if enum_type is not None:
+            value = _enum_value_name(enum_type, actual_value)
+            if value is _UNAVAILABLE:
                 continue
-            value: int | float | bool | str = actual_value
-            if enum_type is not None:
-                try:
-                    enum_value: Any = enum_type.values_by_number.get(actual_value)
-                except _SDK_EXCEPTION:
-                    continue
-                if enum_value is not None:
-                    try:
-                        value = enum_value.name
-                    except _SDK_EXCEPTION:
-                        continue
-            if isinstance(value, (int, float, bool, str)):
-                parameters.append(
-                    SolverParameter(parameter_name, value, ParameterOrigin.EXPLICIT)
-                )
+        if isinstance(value, (int, float, bool, str)):
+            parameters.append(
+                SolverParameter(parameter_name, value, ParameterOrigin.EXPLICIT)
+            )
     return parameters
 
 

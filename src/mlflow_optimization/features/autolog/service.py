@@ -72,6 +72,27 @@ class AutologManager:
         """The workspace of the outermost solve observed in this context."""
         return _workspace.get()
 
+    def _open_workspace(
+        self, api: str
+    ) -> tuple[Token[ArtifactWorkspace | None] | None, str | None]:
+        """The context token and directory of the artifact workspace, each None if not created."""
+        workspace_token: Token[ArtifactWorkspace | None] | None = None
+        workspace_directory: str | None = None
+        try:
+            options: ArtifactOptions = self._sink.artifact_options()
+            if options != ArtifactOptions():
+                workspace_directory = mkdtemp(prefix="mlflow-optimization-")
+                workspace_token = _workspace.set(
+                    ArtifactWorkspace(Path(workspace_directory), options)
+                )
+        # NOTE: A defect in the workspace must never change the result of the user's solve.
+        except Exception as exception:  # noqa: BLE001
+            warn(
+                f"Artifact workspace failed for {api}: "
+                f"{type(exception).__name__}: {exception}"
+            )
+        return workspace_token, workspace_directory
+
     def observe[T](
         self,
         api: str,
@@ -91,20 +112,7 @@ class AutologManager:
         workspace_token: Token[ArtifactWorkspace | None] | None = None
         workspace_directory: str | None = None
         try:
-            options: ArtifactOptions | None = None
-            try:
-                options = self._sink.artifact_options()
-                if options != ArtifactOptions():
-                    workspace_directory = mkdtemp(prefix="mlflow-optimization-")
-                    workspace_token = _workspace.set(
-                        ArtifactWorkspace(Path(workspace_directory), options)
-                    )
-            # NOTE: A defect in the workspace must never change the result of the user's solve.
-            except Exception as exception:  # noqa: BLE001
-                warn(
-                    f"Artifact workspace failed for {api}: "
-                    f"{type(exception).__name__}: {exception}"
-                )
+            workspace_token, workspace_directory = self._open_workspace(api)
             failures: list[str] = []
 
             def guard(step: str, operation: Callable[[], object]) -> object:
@@ -158,9 +166,9 @@ class AutologManager:
                 self._sink.record(replace(solve, observation=observation), context)
 
             start: float = perf_counter()
-            try:
-                result = call(progress_hook)
-            except BaseException as error:
+
+            def complete(error: BaseException | None) -> None:
+                """Record the finished solve and warn about every failure."""
                 end: float = perf_counter()
                 scope.active = False
                 end_time_ms: int = int(time() * 1000)
@@ -177,23 +185,13 @@ class AutologManager:
                 guard("recording", lambda: finish(solve))
                 for failure in failures:
                     warn(failure)
+
+            try:
+                result = call(progress_hook)
+            except BaseException as error:
+                complete(error)
                 raise
-            end = perf_counter()
-            scope.active = False
-            end_time_ms = int(time() * 1000)
-            solve = CompletedSolve(
-                api,
-                solve_id,
-                solve_index,
-                start_time_ms,
-                end_time_ms,
-                end - start,
-                None,
-                None,
-            )
-            guard("recording", lambda: finish(solve))
-            for failure in failures:
-                warn(failure)
+            complete(None)
             return cast(T, result)
         finally:
             scope.active = False

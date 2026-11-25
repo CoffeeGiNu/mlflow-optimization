@@ -12,3 +12,4 @@ wheels/
 # Development misc
 .memo/
 .scripts/
+jevlint.toml

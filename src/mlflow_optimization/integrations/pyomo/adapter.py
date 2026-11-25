@@ -6,7 +6,7 @@ import math
 import pkgutil
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import timedelta
-from functools import wraps
+from functools import partial, wraps
 from pathlib import Path
 from typing import Any, cast
 
@@ -97,6 +97,34 @@ class PyomoAdapter:
         if self._patches:
             return
         self._engine_types = {}
+        owners: list[type[Any]] = self._collect_owners()
+        _import_solver_modules("pyomo.contrib.appsi.solvers")
+        _import_solver_modules("pyomo.contrib.solver.solvers")
+        specific_owners: list[type[Any]] = self._register_engine_types()
+        patches: list[Patch] = []
+        seen: set[type[Any]] = set()
+        solver_owners: list[type[Any]] = []
+        for owner in owners:
+            solver_owners.append(owner)
+            solver_owners.extend(self._solve_overrides(owner))
+        solver_owners.extend(specific_owners)
+        for owner in specific_owners:
+            solver_owners.extend(self._solve_overrides(owner))
+        try:
+            for owner in solver_owners:
+                if owner in seen:
+                    continue
+                seen.add(owner)
+                patch: Patch = Patch(owner, "solve")
+                patch.install(partial(self._wrap, observer))
+                patches.append(patch)
+        except (AttributeError, TypeError):
+            for patch in reversed(patches):
+                patch.uninstall()
+            raise
+        self._patches = patches
+
+    def _collect_owners(self) -> list[type[Any]]:
         owner_modules: tuple[tuple[str, tuple[str, ...]], ...] = (
             (
                 "pyomo.contrib.appsi.base",
@@ -121,8 +149,9 @@ class PyomoAdapter:
                 owner_class: Any | None = getattr(owner_module, class_name, None)
                 if isinstance(owner_class, type):
                     owners.append(owner_class)
-        _import_solver_modules("pyomo.contrib.appsi.solvers")
-        _import_solver_modules("pyomo.contrib.solver.solvers")
+        return owners
+
+    def _register_engine_types(self) -> list[type[Any]]:
         specific_owners: list[type[Any]] = []
         optional_modules: tuple[tuple[str, str, str], ...] = (
             ("pyomo.solvers.plugins.solvers.gurobi_direct", "GurobiDirect", "gurobi"),
@@ -163,103 +192,70 @@ class PyomoAdapter:
                 continue
             if isinstance(engine_type, type):
                 self._engine_types[engine_type] = engine_name
-        patches: list[Patch] = []
-        seen: set[type[Any]] = set()
-        solver_owners: list[type[Any]] = []
-        for owner in owners:
-            solver_owners.append(owner)
-            solver_owners.extend(self._solve_overrides(owner))
-        solver_owners.extend(specific_owners)
-        for owner in specific_owners:
-            solver_owners.extend(self._solve_overrides(owner))
-        try:
-            for owner in solver_owners:
-                if owner in seen:
-                    continue
-                seen.add(owner)
-                patch: Patch = Patch(owner, "solve")
+        return specific_owners
 
-                def factory(original: Callable[..., Any]) -> Callable[..., Any]:
-                    original_signature: inspect.Signature = inspect.signature(original)
+    def _wrap(
+        self,
+        observer: SolveObserver,
+        original: Callable[..., Any],
+    ) -> Callable[..., Any]:
+        original_signature: inspect.Signature = inspect.signature(original)
 
-                    @wraps(original)
-                    def wrapped(
-                        *solve_arguments: Any,
-                        **solve_keywords: Any,
-                    ) -> Any:
-                        solve_observer: SolveObserver = observer
-                        solver: Any = receiver_of(
-                            original,
-                            solve_arguments,
-                            solve_keywords,
-                        )
-                        if solver is None:
-                            return original(*solve_arguments, **solve_keywords)
-                        try:
-                            bound_arguments: inspect.BoundArguments = (
-                                original_signature.bind(
-                                    *solve_arguments,
-                                    **solve_keywords,
-                                )
-                            )
-                        except TypeError:
-                            return original(*solve_arguments, **solve_keywords)
-                        model: Any | None = self._model_from_call(
-                            solver,
-                            bound_arguments,
-                        )
-                        solver_time_before: tuple[Any | None, float | None] | None = (
-                            self._solver_time_snapshot(solver)
-                        )
+        @wraps(original)
+        def wrapped(*solve_arguments: Any, **solve_keywords: Any) -> Any:
+            solver: Any = receiver_of(original, solve_arguments, solve_keywords)
+            if solver is None:
+                return original(*solve_arguments, **solve_keywords)
+            try:
+                bound_arguments: inspect.BoundArguments = original_signature.bind(
+                    *solve_arguments,
+                    **solve_keywords,
+                )
+            except TypeError:
+                return original(*solve_arguments, **solve_keywords)
+            model: Any | None = self._model_from_call(solver, bound_arguments)
+            solver_time_before: tuple[Any | None, float | None] | None = (
+                self._solver_time_snapshot(solver)
+            )
 
-                        artifacts: list[ArtifactRequest] = []
-                        diagnostics: dict[str, str] = {}
+            artifacts: list[ArtifactRequest] = []
+            diagnostics: dict[str, str] = {}
 
-                        def extract(
-                            result: Any | None,
-                            error: BaseException | None,
-                        ) -> SolveObservation:
-                            return self._extract(
-                                solver,
-                                model,
-                                result,
-                                error,
-                                solve_keywords,
-                                bound_arguments.arguments,
-                                solver_time_before,
-                                solve_observer.artifact_workspace(),
-                                artifacts,
-                                diagnostics,
-                            )
+            def extract(
+                result: Any | None,
+                error: BaseException | None,
+            ) -> SolveObservation:
+                return self._extract(
+                    solver,
+                    model,
+                    result,
+                    error,
+                    solve_keywords,
+                    bound_arguments.arguments,
+                    solver_time_before,
+                    observer.artifact_workspace(),
+                    artifacts,
+                    diagnostics,
+                )
 
-                        def call(hook: ProgressHook | None) -> Any:
-                            workspace: ArtifactWorkspace | None = (
-                                solve_observer.artifact_workspace()
-                            )
-                            if workspace is None:
-                                return original(*solve_arguments, **solve_keywords)
-                            return self._solve_with_artifacts(
-                                original,
-                                solve_arguments,
-                                solve_keywords,
-                                solver,
-                                model,
-                                workspace,
-                                artifacts,
-                                diagnostics,
-                            )
+            def call(hook: ProgressHook | None) -> Any:
+                workspace: ArtifactWorkspace | None = observer.artifact_workspace()
+                if workspace is None:
+                    return original(*solve_arguments, **solve_keywords)
+                return self._solve_with_artifacts(
+                    original,
+                    solve_arguments,
+                    solve_keywords,
+                    solver,
+                    model,
+                    workspace,
+                    artifacts,
+                    diagnostics,
+                )
 
-                        return solve_observer.observe(self.api, call, extract)
+            return observer.observe(self.api, call, extract)
 
-                    return wrapped
-
-                patch.install(factory)
-                patches.append(patch)
-        except (AttributeError, TypeError):
-            for patch in reversed(patches):
-                patch.uninstall()
-            raise
-        self._patches = patches
+        return wrapped
 
     def _solve_with_artifacts(
         self,
@@ -280,42 +276,13 @@ class PyomoAdapter:
         read_path: Path | None = None
         read_offset: int = 0
         if workspace.options.solver_log:
-            config: Any = self._read(solver, "config")[0]
-            try:
-                if hasattr(config, "logfile"):
-                    user_logfile: Any = config.logfile
-                    if user_logfile:
-                        read_path = Path(str(user_logfile))
-                        read_offset = (
-                            read_path.stat().st_size if read_path.exists() else 0
-                        )
-                    else:
-                        config.logfile = str(log_path)
-                        read_path = log_path
-
-                        def restore() -> None:
-                            config.logfile = user_logfile
-
-                        restorations.append(restore)
-                elif self._is_shell_solver(solver):
-                    user_path: Any | None = call_keywords.get("logfile")
-                    if user_path:
-                        read_path = Path(str(user_path))
-                        read_offset = (
-                            read_path.stat().st_size if read_path.exists() else 0
-                        )
-                    else:
-                        call_keywords["logfile"] = str(log_path)
-                        read_path = log_path
-                else:
-                    diagnostics["optimization.artifacts.solver_log"] = "unsupported"
-            except Exception as setup_error:  # noqa: BLE001
-                read_path = None
-                self._mark_failed(
-                    "optimization.artifacts.solver_log",
-                    setup_error,
-                    diagnostics,
-                )
+            read_path, read_offset = self._redirect_solver_log(
+                solver,
+                call_keywords,
+                log_path,
+                restorations,
+                diagnostics,
+            )
         try:
             return original(*solve_arguments, **call_keywords)
         finally:
@@ -334,6 +301,47 @@ class PyomoAdapter:
                     artifacts,
                     diagnostics,
                 )
+
+    def _redirect_solver_log(
+        self,
+        solver: Any,
+        call_keywords: dict[str, Any],
+        log_path: Path,
+        restorations: list[Callable[[], None]],
+        diagnostics: dict[str, str],
+    ) -> tuple[Path | None, int]:
+        config: Any = self._read(solver, "config")[0]
+        try:
+            if hasattr(config, "logfile"):
+                user_logfile: Any = config.logfile
+                if user_logfile:
+                    user_log_path: Path = Path(str(user_logfile))
+                    return user_log_path, self._log_size(user_log_path)
+                config.logfile = str(log_path)
+
+                def restore() -> None:
+                    config.logfile = user_logfile
+
+                restorations.append(restore)
+                return log_path, 0
+            if self._is_shell_solver(solver):
+                user_path: Any | None = call_keywords.get("logfile")
+                if user_path:
+                    user_log_path = Path(str(user_path))
+                    return user_log_path, self._log_size(user_log_path)
+                call_keywords["logfile"] = str(log_path)
+                return log_path, 0
+            diagnostics["optimization.artifacts.solver_log"] = "unsupported"
+        except Exception as setup_error:  # noqa: BLE001
+            self._mark_failed(
+                "optimization.artifacts.solver_log",
+                setup_error,
+                diagnostics,
+            )
+        return None, 0
+
+    def _log_size(self, path: Path) -> int:
+        return path.stat().st_size if path.exists() else 0
 
     def _is_shell_solver(self, solver: Any) -> bool:
         try:
@@ -613,43 +621,33 @@ class PyomoAdapter:
         termination = self._map_termination(
             native_termination if native_termination is not None else status
         )
-        native_termination_name: str | None = self._native_name(native_termination)
-        solution_status_name: str | None = self._native_name(
+        termination_name: str | None = self._normalized_name(native_termination)
+        solution_status_name: str | None = self._normalized_name(
             self._first_value(result_sources, "solution_status")
         )
         if (
-            native_termination_name is not None
-            and native_termination_name.rsplit(".", 1)[-1].casefold()
-            == "convergencecriteriasatisfied"
+            termination_name == "convergencecriteriasatisfied"
             and solution_status_name is not None
         ):
-            normalized_solution_status: str = solution_status_name.rsplit(".", 1)[
-                -1
-            ].casefold()
-            if normalized_solution_status == "optimal":
+            if solution_status_name == "optimal":
                 termination = Termination.OPTIMAL
-            elif normalized_solution_status == "feasible":
+            elif solution_status_name == "feasible":
                 termination = Termination.FEASIBLE
         native_solver: Any | None = self._read(solver, "_solver_model")[0]
         has_solution: bool | None = self._has_solution(
             result_sources,
             native_solver,
         )
-        if (
-            native_termination_name is not None
-            and native_termination_name.rsplit(".", 1)[-1].casefold() == "other"
-            and has_solution is True
-        ):
+        if termination_name == "other" and has_solution is True:
             termination = Termination.FEASIBLE
         if termination is Termination.UNBOUNDED:
             has_solution = False
         return ReportedOutcome(raw_status, termination, has_solution)
 
     def _map_termination(self, value: Any | None) -> Termination:
-        native_name: str | None = self._native_name(value)
-        if native_name is None:
+        normalized_name: str | None = self._normalized_name(value)
+        if normalized_name is None:
             return Termination.UNKNOWN
-        normalized_name: str = native_name.rsplit(".", 1)[-1].casefold()
         terminations: Mapping[str, Termination] = {
             "convergencecriteriasatisfied": Termination.UNKNOWN,
             "optimal": Termination.OPTIMAL,
@@ -702,6 +700,23 @@ class PyomoAdapter:
     ) -> bool | None:
         if not result_sources:
             return None
+        legacy_state: bool | None = self._legacy_solution_state(result_sources)
+        if legacy_state is not None:
+            return legacy_state
+        for source in result_sources:
+            reported_state: bool | None = self._reported_solution_state(source)
+            if reported_state is not None:
+                return reported_state
+        for source in result_sources:
+            objective_state: bool | None = self._objective_solution_state(
+                source,
+                native_solver,
+            )
+            if objective_state is not None:
+                return objective_state
+        return None
+
+    def _legacy_solution_state(self, result_sources: Sequence[Any]) -> bool | None:
         has_feasible_legacy_solution: bool = False
         has_infeasible_legacy_solution: bool = False
         # NOTE: A legacy SOL reader can retain an infeasible final iterate.
@@ -709,34 +724,25 @@ class PyomoAdapter:
             solutions: Any | None = self._read(source, "solution")[0]
             if solutions is None:
                 continue
-            legacy_solution_count: int | None = None
             try:
-                legacy_solution_count = len(solutions)
+                legacy_solution_count: int = len(solutions)
             except Exception:  # noqa: BLE001,S112
                 continue
-            if legacy_solution_count is None or legacy_solution_count == 0:
+            if legacy_solution_count == 0:
                 continue
             try:
                 for solution in solutions:
-                    legacy_solution_status: Any | None = self._read(solution, "status")[
-                        0
-                    ]
-                    legacy_status_name: str | None = self._native_name(
-                        legacy_solution_status
+                    legacy_status: str | None = self._normalized_name(
+                        self._read(solution, "status")[0]
                     )
-                    if legacy_status_name is None:
-                        continue
-                    legacy_normalized_status: str = legacy_status_name.rsplit(".", 1)[
-                        -1
-                    ].casefold()
-                    if legacy_normalized_status in (
+                    if legacy_status in (
                         "feasible",
                         "optimal",
                         "globallyoptimal",
                         "locallyoptimal",
                     ):
                         has_feasible_legacy_solution = True
-                    elif legacy_normalized_status in ("infeasible", "error"):
+                    elif legacy_status in ("infeasible", "error"):
                         has_infeasible_legacy_solution = True
             except Exception:  # noqa: BLE001,S112
                 continue
@@ -744,50 +750,37 @@ class PyomoAdapter:
             return True
         if has_infeasible_legacy_solution:
             return False
-        for source in result_sources:
-            explicit_value: Any | None = self._read(source, "has_solution")[0]
-            if isinstance(explicit_value, bool):
-                return explicit_value
-            solution_status: Any | None = self._read(source, "solution_status")[0]
-            solution_status_name: str | None = self._native_name(solution_status)
-            if solution_status_name is not None:
-                normalized_status: str = solution_status_name.rsplit(".", 1)[
-                    -1
-                ].casefold()
-                if normalized_status == "nosolution":
-                    return False
-                if normalized_status in ("feasible", "optimal"):
-                    return True
-            solution_count: float | None = self._solution_count(source)
-            if solution_count is not None:
-                return solution_count > 0
-        for source in result_sources:
-            feasible_objective: Any | None
-            objective_reason: MissingReason | None
-            feasible_objective, objective_reason = self._read(
-                source,
-                "best_feasible_objective",
-            )
-            feasible_number: float | None = self._native_number(
-                feasible_objective,
-                native_solver,
-            )
-            if feasible_number is not None:
-                return math.isfinite(feasible_number)
-            if objective_reason is MissingReason.UNDEFINED:
-                return False
-            incumbent_objective: Any | None
-            incumbent_reason: MissingReason | None
-            incumbent_objective, incumbent_reason = self._read(
-                source, "incumbent_objective"
-            )
-            incumbent_number: float | None = self._native_number(
-                incumbent_objective,
-                native_solver,
-            )
-            if incumbent_number is not None:
-                return math.isfinite(incumbent_number)
-            if incumbent_reason is MissingReason.UNDEFINED:
+        return None
+
+    def _reported_solution_state(self, source: Any) -> bool | None:
+        explicit_value: Any | None = self._read(source, "has_solution")[0]
+        if isinstance(explicit_value, bool):
+            return explicit_value
+        solution_status: str | None = self._normalized_name(
+            self._read(source, "solution_status")[0]
+        )
+        if solution_status == "nosolution":
+            return False
+        if solution_status in ("feasible", "optimal"):
+            return True
+        solution_count: float | None = self._solution_count(source)
+        if solution_count is not None:
+            return solution_count > 0
+        return None
+
+    def _objective_solution_state(
+        self,
+        source: Any,
+        native_solver: Any | None,
+    ) -> bool | None:
+        for field_name in ("best_feasible_objective", "incumbent_objective"):
+            objective: Any | None
+            reason: MissingReason | None
+            objective, reason = self._read(source, field_name)
+            number: float | None = self._native_number(objective, native_solver)
+            if number is not None:
+                return math.isfinite(number)
+            if reason is MissingReason.UNDEFINED:
                 return False
         return None
 
@@ -1121,10 +1114,7 @@ class PyomoAdapter:
             previous_timing_information,
             "highs_time",
         )[0]
-        if isinstance(previous_timing_value, timedelta):
-            return native_solver, float(previous_timing_value.total_seconds())
-        previous_solver_time: float | None = self._number(previous_timing_value)
-        return native_solver, previous_solver_time
+        return native_solver, self._seconds(previous_timing_value)
 
     def _solver_time(
         self,
@@ -1134,42 +1124,11 @@ class PyomoAdapter:
         solver_time_before: tuple[Any | None, float | None] | None,
     ) -> float | MissingReason:
         if engine == "highs":
-            if solver_time_before is None:
-                return MissingReason.UNSUPPORTED
-            previous_solver: Any | None
-            previous_time: float | None
-            previous_solver, previous_time = solver_time_before
-            if native_solver is not None and native_solver is not previous_solver:
-                previous_time = 0.0
-            elif native_solver is None and (
-                previous_solver is not None or previous_time != 0.0
-            ):
-                return MissingReason.UNSUPPORTED
-            if previous_time is None:
-                return MissingReason.UNSUPPORTED
-            cumulative_solver_time: float | None = self._method_number(
+            return self._highs_solver_time(
+                result_sources,
                 native_solver,
-                "getRunTime",
+                solver_time_before,
             )
-            if cumulative_solver_time is None:
-                for result_source in result_sources:
-                    result_timing_information: Any | None = self._read(
-                        result_source,
-                        "timing_info",
-                    )[0]
-                    timing_value: Any | None = self._read(
-                        result_timing_information,
-                        "highs_time",
-                    )[0]
-                    if isinstance(timing_value, timedelta):
-                        cumulative_solver_time = float(timing_value.total_seconds())
-                    else:
-                        cumulative_solver_time = self._number(timing_value)
-                    if cumulative_solver_time is not None:
-                        break
-            if cumulative_solver_time is None or cumulative_solver_time < previous_time:
-                return MissingReason.UNSUPPORTED
-            return cumulative_solver_time - previous_time
         if engine == "gurobi":
             runtime: float | None = self._number(
                 self._read(native_solver, "Runtime")[0]
@@ -1181,19 +1140,57 @@ class PyomoAdapter:
                 result_source,
                 "timing_info",
             )[0]
-            for owner, name in (
-                (timing_information, "gurobi_time"),
-                (timing_information, "scip_time"),
-            ):
-                value: Any | None = self._read(owner, name)[0]
+            for name in ("gurobi_time", "scip_time"):
+                value: Any | None = self._read(timing_information, name)[0]
                 if value is None:
                     continue
-                if isinstance(value, timedelta):
-                    return float(value.total_seconds())
-                number: float | None = self._number(value)
-                if number is not None:
-                    return number
+                seconds: float | None = self._seconds(value)
+                if seconds is not None:
+                    return seconds
         return MissingReason.UNSUPPORTED
+
+    def _highs_solver_time(
+        self,
+        result_sources: Sequence[Any],
+        native_solver: Any | None,
+        solver_time_before: tuple[Any | None, float | None] | None,
+    ) -> float | MissingReason:
+        if solver_time_before is None:
+            return MissingReason.UNSUPPORTED
+        previous_solver: Any | None
+        previous_time: float | None
+        previous_solver, previous_time = solver_time_before
+        if native_solver is not None and native_solver is not previous_solver:
+            previous_time = 0.0
+        elif native_solver is None and (
+            previous_solver is not None or previous_time != 0.0
+        ):
+            return MissingReason.UNSUPPORTED
+        if previous_time is None:
+            return MissingReason.UNSUPPORTED
+        cumulative_solver_time: float | None = self._method_number(
+            native_solver,
+            "getRunTime",
+        )
+        if cumulative_solver_time is None:
+            cumulative_solver_time = self._highs_result_time(result_sources)
+        if cumulative_solver_time is None or cumulative_solver_time < previous_time:
+            return MissingReason.UNSUPPORTED
+        return cumulative_solver_time - previous_time
+
+    def _highs_result_time(self, result_sources: Sequence[Any]) -> float | None:
+        cumulative_solver_time: float | None = None
+        for result_source in result_sources:
+            timing_information: Any | None = self._read(
+                result_source,
+                "timing_info",
+            )[0]
+            cumulative_solver_time = self._seconds(
+                self._read(timing_information, "highs_time")[0]
+            )
+            if cumulative_solver_time is not None:
+                break
+        return cumulative_solver_time
 
     def _statistics(
         self,
@@ -1624,52 +1621,60 @@ class PyomoAdapter:
     def _solver_version(self, solver: Any, result: Any | None) -> str | None:
         native_solver: Any | None = self._read(solver, "_solver_model")[0]
         engine: str | None = self._engine(solver)
-        if native_solver is not None and engine == "scip":
-            version_parts: tuple[float | None, ...] = tuple(
-                self._method_number(native_solver, method_name)
-                for method_name in (
-                    "getMajorVersion",
-                    "getMinorVersion",
-                    "getTechVersion",
-                )
-            )
-            if all(version_part is not None for version_part in version_parts):
-                checked_version_parts = cast(tuple[float, float, float], version_parts)
-                return ".".join(str(int(part)) for part in checked_version_parts)
         if native_solver is not None:
+            if engine == "scip":
+                scip_version: str | None = self._scip_version(native_solver)
+                if scip_version is not None:
+                    return scip_version
             for method_name in ("version", "getVersion"):
-                version_member: Any | None = self._read(native_solver, method_name)[0]
-                if callable(version_member):
-                    native_version: Any | None = None
-                    try:
-                        native_version = version_member()
-                    except Exception:  # noqa: BLE001
-                        native_version = None
-                    if native_version is not None:
-                        native_version_string: str | None = self._string(native_version)
-                        if native_version_string is not None:
-                            return native_version_string
+                native_version: str | None = self._called_string(
+                    native_solver,
+                    method_name,
+                )
+                if native_version is not None:
+                    return native_version
         if engine == "scip":
             return None
-        solver_version: Any | None = self._read(solver, "_version")[0]
-        if solver_version is not None:
-            configured_solver_version: str | None = self._string(solver_version)
-            if configured_solver_version is not None:
-                return configured_solver_version
-        engine_module: str | None = None
-        if native_solver is not None:
-            engine_module = type(native_solver).__module__.split(".", 1)[0]
-        if engine_module is not None:
-            try:
-                module: Any = importlib.import_module(engine_module)
-            except ImportError:
-                module = None
-            module_version: Any | None = self._read(module, "__version__")[0]
-            if module_version is not None:
-                module_solver_version: str | None = self._string(module_version)
-                if module_solver_version is not None:
-                    return module_solver_version
-        result_sources: tuple[Any, ...] = self._result_sources(solver, result)
+        configured_version: str | None = self._string(self._read(solver, "_version")[0])
+        if configured_version is not None:
+            return configured_version
+        module_version: str | None = self._module_version(native_solver)
+        if module_version is not None:
+            return module_version
+        result_version: str | None = self._result_version(
+            self._result_sources(solver, result)
+        )
+        if result_version is not None:
+            return result_version
+        if engine == "highs":
+            return self._called_string(solver, "version")
+        return None
+
+    def _scip_version(self, native_solver: Any) -> str | None:
+        version_parts: tuple[float | None, ...] = tuple(
+            self._method_number(native_solver, method_name)
+            for method_name in (
+                "getMajorVersion",
+                "getMinorVersion",
+                "getTechVersion",
+            )
+        )
+        if any(version_part is None for version_part in version_parts):
+            return None
+        checked_version_parts = cast(tuple[float, float, float], version_parts)
+        return ".".join(str(int(part)) for part in checked_version_parts)
+
+    def _module_version(self, native_solver: Any | None) -> str | None:
+        if native_solver is None:
+            return None
+        engine_module: str = type(native_solver).__module__.split(".", 1)[0]
+        try:
+            module: Any = importlib.import_module(engine_module)
+        except ImportError:
+            module = None
+        return self._string(self._read(module, "__version__")[0])
+
+    def _result_version(self, result_sources: Sequence[Any]) -> str | None:
         for result_source in result_sources:
             solver_result: Any | None = self._read(result_source, "solver")[0]
             for owner in (solver_result, result_source):
@@ -1677,18 +1682,20 @@ class PyomoAdapter:
                     value: Any | None = self._read(owner, name)[0]
                     if value is None or callable(value):
                         continue
-                    version = self._string(value)
+                    version: str | None = self._string(value)
                     if version is not None:
                         return version
-        if engine == "highs":
-            version_method: Any | None = self._read(solver, "version")[0]
-            if callable(version_method):
-                try:
-                    version_value: Any = version_method()
-                except Exception:  # noqa: BLE001
-                    return None
-                return self._string(version_value)
         return None
+
+    def _called_string(self, owner: Any | None, name: str) -> str | None:
+        member: Any | None = self._read(owner, name)[0]
+        if not callable(member):
+            return None
+        try:
+            value: Any = member()
+        except Exception:  # noqa: BLE001
+            return None
+        return self._string(value)
 
     def _read(
         self, owner: Any | None, name: str
@@ -1719,6 +1726,17 @@ class PyomoAdapter:
             return None
         except Exception:  # noqa: BLE001
             return None
+
+    def _normalized_name(self, value: Any | None) -> str | None:
+        native_name: str | None = self._native_name(value)
+        if native_name is None:
+            return None
+        return native_name.rsplit(".", 1)[-1].casefold()
+
+    def _seconds(self, value: Any | None) -> float | None:
+        if isinstance(value, timedelta):
+            return float(value.total_seconds())
+        return self._number(value)
 
     def _string(self, value: Any | None) -> str | None:
         if value is None:

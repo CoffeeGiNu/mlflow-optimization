@@ -248,6 +248,63 @@ class CpSatAdapter:
             diagnostics[tag] = "failed"
             warn(f"Could not read the CP-SAT infeasibility core: {core_error}")
 
+    def _wrap_solution_callback(
+        self,
+        solution_callback: Any,
+        hook: ProgressHook,
+        has_objective: bool,
+    ) -> Callable[[], None] | None:
+        """Solution callback wrapper installer returning its restore function."""
+        instance_namespace: dict[str, Any] | None = getattr(
+            solution_callback,
+            "__dict__",
+            None,
+        )
+        if instance_namespace is None:
+            return None
+        solution_callback_type: type[Any] = type(solution_callback)
+        base_on_solution_callback: Any = (
+            cp_model.CpSolverSolutionCallback.OnSolutionCallback
+        )
+        callback_on_solution_callback: Any = getattr(
+            solution_callback_type,
+            "OnSolutionCallback",
+            base_on_solution_callback,
+        )
+        callback_on_solution_handler: Any = getattr(
+            solution_callback_type,
+            "on_solution_callback",
+            None,
+        )
+        can_wrap_solution_callback: bool = (
+            callback_on_solution_callback is base_on_solution_callback
+            and "OnSolutionCallback" not in instance_namespace
+            and not hasattr(callback_on_solution_handler, "__set__")
+        )
+        if not can_wrap_solution_callback:
+            return None
+        original_handler: Any = solution_callback.on_solution_callback
+        if not callable(original_handler):
+            return None
+        instance_handler_present: bool = "on_solution_callback" in instance_namespace
+        original_instance_handler: Any = None
+        if instance_handler_present:
+            original_instance_handler = instance_namespace["on_solution_callback"]
+
+        def combined_solution_callback() -> None:
+            _record_solution_progress(solution_callback, hook, has_objective)
+            original_handler()
+
+        instance_namespace["on_solution_callback"] = combined_solution_callback
+
+        def restore() -> None:
+            if instance_handler_present:
+                instance_namespace["on_solution_callback"] = original_instance_handler
+            else:
+                instance_namespace.pop("on_solution_callback", None)
+
+        return restore
+
     def _call_with_progress(
         self,
         original: Callable[..., Any],
@@ -263,10 +320,7 @@ class CpSatAdapter:
 
         original_best_bound_callback: Callable[[float], None] | None = None
         best_bound_callback_installed: bool = False
-        solution_callback_instance_namespace: dict[str, Any] | None = None
-        solution_callback_instance_handler_present: bool = False
-        original_solution_callback_instance_handler: Any = None
-        solution_callback_wrapped: bool = False
+        restore_solution_callback: Callable[[], None] | None = None
         call_arguments: tuple[Any, ...] = args
         call_keywords: dict[str, Any] = dict(kwargs)
         solution_callback: Any | None = kwargs.get("solution_callback")
@@ -274,19 +328,8 @@ class CpSatAdapter:
             solution_callback = args[2]
 
         def restore_callbacks() -> None:
-            if (
-                solution_callback_wrapped
-                and solution_callback_instance_namespace is not None
-            ):
-                if solution_callback_instance_handler_present:
-                    solution_callback_instance_namespace["on_solution_callback"] = (
-                        original_solution_callback_instance_handler
-                    )
-                else:
-                    solution_callback_instance_namespace.pop(
-                        "on_solution_callback",
-                        None,
-                    )
+            if restore_solution_callback is not None:
+                restore_solution_callback()
             if best_bound_callback_installed:
                 solver.best_bound_callback = original_best_bound_callback
 
@@ -300,62 +343,12 @@ class CpSatAdapter:
                 callback_to_pass = _CpSatProgressCallback(hook, has_objective)
                 replace_solution_callback = True
             else:
-                solution_callback_instance_namespace = getattr(
+                restore_solution_callback = self._wrap_solution_callback(
                     solution_callback,
-                    "__dict__",
-                    None,
+                    hook,
+                    has_objective,
                 )
-                if solution_callback_instance_namespace is not None:
-                    solution_callback_type: type[Any] = type(solution_callback)
-                    base_on_solution_callback: Any = (
-                        cp_model.CpSolverSolutionCallback.OnSolutionCallback
-                    )
-                    callback_on_solution_callback: Any = getattr(
-                        solution_callback_type,
-                        "OnSolutionCallback",
-                        base_on_solution_callback,
-                    )
-                    callback_on_solution_handler: Any = getattr(
-                        solution_callback_type,
-                        "on_solution_callback",
-                        None,
-                    )
-                    can_wrap_solution_callback: bool = (
-                        callback_on_solution_callback is base_on_solution_callback
-                        and "OnSolutionCallback"
-                        not in solution_callback_instance_namespace
-                        and not hasattr(callback_on_solution_handler, "__set__")
-                    )
-                    if can_wrap_solution_callback:
-                        original_solution_callback_handler: Any = (
-                            solution_callback.on_solution_callback
-                        )
-                        if callable(original_solution_callback_handler):
-                            solution_callback_instance_handler_present = (
-                                "on_solution_callback"
-                                in solution_callback_instance_namespace
-                            )
-                            if solution_callback_instance_handler_present:
-                                original_solution_callback_instance_handler = (
-                                    solution_callback_instance_namespace[
-                                        "on_solution_callback"
-                                    ]
-                                )
-
-                            def combined_solution_callback() -> None:
-                                _record_solution_progress(
-                                    solution_callback,
-                                    hook,
-                                    has_objective,
-                                )
-                                original_solution_callback_handler()
-
-                            solution_callback_wrapped = True
-                            solution_callback_instance_namespace[
-                                "on_solution_callback"
-                            ] = combined_solution_callback
-                            callback_to_pass = solution_callback
-                            replace_solution_callback = True
+                replace_solution_callback = restore_solution_callback is not None
 
             def combined_best_bound_callback(bound: float) -> None:
                 bound_value: float | None = None

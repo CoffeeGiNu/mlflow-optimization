@@ -50,7 +50,7 @@ _SOLVE_IDENTITY_TAG_KEYS: tuple[str, ...] = (
 class MlflowRunStore:
     """Solve runs stored through the MLflow tracking client."""
 
-    def active_run(self: MlflowRunStore) -> RunReference | None:
+    def active_run(self) -> RunReference | None:
         active_mlflow_run: ActiveRun | None = _run_store_sdk_call(
             "reading the active run",
             mlflow.active_run,
@@ -71,7 +71,7 @@ class MlflowRunStore:
         )
 
     def start(
-        self: MlflowRunStore,
+        self,
         name: str,
         start_time_ms: int,
         tags: Mapping[str, str],
@@ -126,7 +126,7 @@ class MlflowRunStore:
         )
 
     def log_history(
-        self: MlflowRunStore,
+        self,
         run: RunReference,
         points: Sequence[HistoryPoint],
     ) -> None:
@@ -161,7 +161,7 @@ class MlflowRunStore:
         )
 
     def finish(
-        self: MlflowRunStore,
+        self,
         run: RunReference,
         record: SolveRecord,
         *,
@@ -206,9 +206,7 @@ class MlflowRunStore:
                 ),
             )
 
-    def save(
-        self: MlflowRunStore, record: SolveRecord, parent: RunReference | None
-    ) -> RunReference:
+    def save(self, record: SolveRecord, parent: RunReference | None) -> RunReference:
         tracking_uri: str = _run_store_sdk_call(
             "saving the run", mlflow.get_tracking_uri
         )
@@ -267,7 +265,7 @@ class MlflowRunStore:
         )
 
     def _prepare_run(
-        self: MlflowRunStore,
+        self,
         name: str,
         tags: Mapping[str, str],
         parent: RunReference | None,
@@ -307,7 +305,7 @@ class MlflowRunStore:
         return experiment_id, run_name, context_tag_values, creation_tag_values
 
     def _resolve_context_tag_values(
-        self: MlflowRunStore,
+        self,
         run_name: str,
         tags: Mapping[str, str],
         parent: RunReference | None,
@@ -325,7 +323,7 @@ class MlflowRunStore:
         )
 
     def _create_run(
-        self: MlflowRunStore,
+        self,
         tracking_client: MlflowClient,
         experiment_id: str,
         start_time_ms: int,
@@ -345,7 +343,7 @@ class MlflowRunStore:
         )
 
     def _log_solve_record(
-        self: MlflowRunStore,
+        self,
         tracking_client: MlflowClient,
         run_id: str,
         record: SolveRecord,
@@ -407,9 +405,7 @@ class MlflowRunStore:
             operation,
         )
 
-    def log_metric(
-        self: MlflowRunStore, run: RunReference, key: str, value: float
-    ) -> None:
+    def log_metric(self, run: RunReference, key: str, value: float) -> None:
         tracking_uri: str = _run_store_sdk_call(
             "logging a metric", mlflow.get_tracking_uri
         )
@@ -430,9 +426,7 @@ class MlflowRunStore:
             ),
         )
 
-    def set_tags(
-        self: MlflowRunStore, run: RunReference, tags: Mapping[str, str]
-    ) -> None:
+    def set_tags(self, run: RunReference, tags: Mapping[str, str]) -> None:
         tracking_uri: str = _run_store_sdk_call("setting tags", mlflow.get_tracking_uri)
         tracking_client: MlflowClient = _run_store_sdk_call(
             "setting tags",
@@ -446,7 +440,7 @@ class MlflowRunStore:
         )
 
     def _log_metric_batches(
-        self: MlflowRunStore,
+        self,
         tracking_client: MlflowClient,
         run_id: str,
         metric_entities: list[Metric],
@@ -492,7 +486,7 @@ class MlflowRunStore:
             )
 
     def _log_parameter_batches(
-        self: MlflowRunStore,
+        self,
         tracking_client: MlflowClient,
         run_id: str,
         parameter_entities: list[Param],
@@ -538,7 +532,7 @@ class MlflowRunStore:
             )
 
     def _log_tag_batches(
-        self: MlflowRunStore,
+        self,
         tracking_client: MlflowClient,
         run_id: str,
         tag_entities: list[RunTag],

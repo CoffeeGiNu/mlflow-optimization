@@ -235,35 +235,9 @@ def _wrap_solve_entry_point(
             lambda: int(model.getStage()),
             MissingReason.FAILED,
         )
-        counter_snapshot: (
-            tuple[
-                int | MissingReason,
-                dict[str, float | MissingReason],
-            ]
-            | None
-        ) = None
-        counter_cache_available: bool = True
-        try:
-            counter_snapshot = counter_snapshots.get(model)
-        except Exception:  # noqa: BLE001
-            counter_cache_available = False
-        counters_before_solve: dict[str, float | MissingReason] | None = None
-        if not counter_cache_available or isinstance(
-            stage_before_solve,
-            MissingReason,
-        ):
-            counters_before_solve = _unavailable_solve_counters()
-        elif counter_snapshot is None:
-            if stage_before_solve != pyscipopt.scip.PY_SCIP_STAGE.PROBLEM:
-                counters_before_solve = _unavailable_solve_counters()
-        else:
-            previous_stage: int | MissingReason = counter_snapshot[0]
-            if isinstance(previous_stage, MissingReason):
-                counters_before_solve = _unavailable_solve_counters()
-            elif stage_before_solve == previous_stage:
-                counters_before_solve = counter_snapshot[1]
-            elif stage_before_solve != pyscipopt.scip.PY_SCIP_STAGE.PROBLEM:
-                counters_before_solve = _unavailable_solve_counters()
+        counters_before_solve: dict[str, float | MissingReason] | None = (
+            _counters_before_solve(counter_snapshots, model, stage_before_solve)
+        )
 
         # NOTE: SCIP changes parameters while solving, so capture configured values first.
         parameters_before_solve: tuple[SolverParameter, ...] = _read_parameters(
@@ -317,28 +291,9 @@ def _wrap_solve_entry_point(
             result: Any | None, error: BaseException | None
         ) -> SolveObservation:
             try:
-                counters_after_solve: dict[str, float | MissingReason] | None = None
-                if error is None:
-                    counters_after_solve = _read_solve_counters(model)
-                    stage_after_solve: int | MissingReason = _read_value(
-                        lambda: int(model.getStage()),
-                        MissingReason.FAILED,
-                    )
-                    try:
-                        counter_snapshots[model] = (
-                            stage_after_solve,
-                            counters_after_solve,
-                        )
-                    except Exception:  # noqa: BLE001
-                        counter_snapshots.clear()
-                else:
-                    try:
-                        counter_snapshots[model] = (
-                            MissingReason.FAILED,
-                            _unavailable_solve_counters(),
-                        )
-                    except Exception:  # noqa: BLE001
-                        counter_snapshots.clear()
+                counters_after_solve: dict[str, float | MissingReason] | None = (
+                    _store_counters_after_solve(counter_snapshots, model, error)
+                )
                 observation: SolveObservation = _extract_observation(
                     model,
                     error,
@@ -372,6 +327,76 @@ def _wrap_solve_entry_point(
         return observer.observe(integration.api, call, extract)
 
     return observed_entry_point
+
+
+def _counters_before_solve(
+    counter_snapshots: WeakKeyDictionary[
+        Any,
+        tuple[int | MissingReason, dict[str, float | MissingReason]],
+    ],
+    model: Any,
+    stage_before_solve: int | MissingReason,
+) -> dict[str, float | MissingReason] | None:
+    """The solve counters carried over to a solve, or unavailable ones when they cannot be trusted."""
+    counter_snapshot: (
+        tuple[
+            int | MissingReason,
+            dict[str, float | MissingReason],
+        ]
+        | None
+    ) = None
+    counter_cache_available: bool = True
+    try:
+        counter_snapshot = counter_snapshots.get(model)
+    except Exception:  # noqa: BLE001
+        counter_cache_available = False
+    if not counter_cache_available or isinstance(
+        stage_before_solve,
+        MissingReason,
+    ):
+        return _unavailable_solve_counters()
+    if counter_snapshot is None:
+        if stage_before_solve != pyscipopt.scip.PY_SCIP_STAGE.PROBLEM:
+            return _unavailable_solve_counters()
+        return None
+    previous_stage: int | MissingReason = counter_snapshot[0]
+    if isinstance(previous_stage, MissingReason):
+        return _unavailable_solve_counters()
+    if stage_before_solve == previous_stage:
+        return counter_snapshot[1]
+    if stage_before_solve != pyscipopt.scip.PY_SCIP_STAGE.PROBLEM:
+        return _unavailable_solve_counters()
+    return None
+
+
+def _store_counters_after_solve(
+    counter_snapshots: WeakKeyDictionary[
+        Any,
+        tuple[int | MissingReason, dict[str, float | MissingReason]],
+    ],
+    model: Any,
+    error: BaseException | None,
+) -> dict[str, float | MissingReason] | None:
+    """The solve counters after a solve, stored as the model snapshot."""
+    if error is not None:
+        try:
+            counter_snapshots[model] = (
+                MissingReason.FAILED,
+                _unavailable_solve_counters(),
+            )
+        except Exception:  # noqa: BLE001
+            counter_snapshots.clear()
+        return None
+    counters_after_solve: dict[str, float | MissingReason] = _read_solve_counters(model)
+    stage_after_solve: int | MissingReason = _read_value(
+        lambda: int(model.getStage()),
+        MissingReason.FAILED,
+    )
+    try:
+        counter_snapshots[model] = (stage_after_solve, counters_after_solve)
+    except Exception:  # noqa: BLE001
+        counter_snapshots.clear()
+    return counters_after_solve
 
 
 def _begin_artifacts(
